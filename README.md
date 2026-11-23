@@ -61,8 +61,7 @@ cp apps/sample-app.yaml apps/my-app.yaml
 export CLAUDE_CODE_OAUTH_TOKEN=...      # or ANTHROPIC_API_KEY=...
 
 #    …or encrypted with sops + age, loaded by direnv (.envrc is included)
-#    edit .sops.yaml with your age public key, then:
-sops secrets.enc.env                    # CLAUDE_CODE_OAUTH_TOKEN=...
+sops --age "$(age-keygen -y ~/.config/sops/age/keys.txt)" secrets.enc.env   # CLAUDE_CODE_OAUTH_TOKEN=...
 direnv allow                            # also puts bin/ on your PATH
 ```
 
