@@ -1,0 +1,16 @@
+{
+  "name": "blindforge",
+  "version": "0.1.0",
+  "description": "A local software factory where AI implements against acceptance tests it never sees.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "blindforge": "bin/blindforge.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "yaml": "2.9.1"
+  }
+}

@@ -1,0 +1,33 @@
+# The app repository blindforge builds, and the repository that holds its hidden acceptance tests.
+repo: your-org/sample-app
+holdoutRepo: your-org/sample-holdout
+baseBranch: main
+
+# How many implement → gates → holdout rounds before giving up (draft PR).
+maxAttempts: 3
+agent:
+  maxTurns: 150
+
+# Run inside the containers. Install failures exit 97 and count as infrastructure failures.
+installCommand: pnpm install --frozen-lockfile
+gatesCommand: pnpm exec playwright install chromium > /dev/null && pnpm lint && pnpm typecheck && pnpm test && pnpm e2e
+# Must listen on 0.0.0.0:8787. Hidden tests reach it at http://localhost:8787.
+appCommand: pnpm build && pnpm start --host 0.0.0.0 --port 8787
+healthPath: /api/health
+
+# Changes under these paths are never auto-merged (a trailing / means a directory).
+exceptions:
+  - specs/
+  - blindforge/
+  - .github/
+  - CLAUDE.md
+  - apps/api/src/auth/
+
+# Changes that delete lines under these paths are never auto-merged (pure additions are fine).
+contractDeletionPaths:
+  - packages/api-contract/
+
+timeoutsMinutes:
+  agent: 90
+  gates: 30
+  holdout: 30

@@ -1,0 +1,140 @@
+# The factory's container definitions.
+# This file alone decides what each container can see. Never put it in the repository the AI works on.
+#
+# - agent:   the AI implements. Sees only WORKSPACE (the app clone)
+# - gates:   runs lint / types / unit / E2E on the committed code. Sees WORKSPACE read-only
+# - app:     starts the committed code. Sees WORKSPACE read-only. Never sees the holdout
+# - holdout: tests app from outside. Sees HOLDOUT read-only. Runs none of the AI's code
+# - holdout-writer: writes tests from the spec's acceptance criteria. Sees the HOLDOUT clone (read-write)
+#                   and only the app's specs/ (read-only). Never sees the app's source code
+#                   (so it can't write tests that read or run the source)
+#
+# Dependency installs run separately via INSTALL_COMMAND and exit with code 97 on failure.
+# The factory treats that as an infrastructure failure and doesn't use up an AI attempt.
+#
+# Caches (named volumes shared across runs):
+#   - blindforge-pnpm-store:        gates / app / preview
+#   - blindforge-pnpm-store-agent:  agent only (if the AI tampers with its cache, other containers are unaffected)
+#   - blindforge-npm-holdout:       holdout
+#   - blindforge-npm-holdout-writer: holdout-writer only
+# If you change which services talk to each other, update the blindforge status diagram too (EDGES in bin/network.mjs)
+# The factory never deploys to production (it only creates a Release; the app's GitHub Actions deploys)
+# - preview: starts the same thing as app so a human can try it, publishing the port only on the host's 127.0.0.1
+name: blindforge
+
+x-image: &image
+  build:
+    context: .
+    dockerfile: agent.Dockerfile
+  image: blindforge-agent
+
+services:
+  agent:
+    <<: *image
+    profiles: [agent]
+    volumes:
+      - ${WORKSPACE:?}:/work
+      - pnpm-store-agent:/home/pwuser/.pnpm-store
+    environment:
+      - CLAUDE_CODE_OAUTH_TOKEN
+      - ANTHROPIC_API_KEY
+    working_dir: /work
+
+  holdout-writer:
+    <<: *image
+    profiles: [holdout-writer]
+    volumes:
+      - ${WORKSPACE:?}:/work
+      - ${APP_SRC:?}/specs:/app/specs:ro
+      - npm-holdout-writer:/home/pwuser/.npm
+    environment:
+      - CLAUDE_CODE_OAUTH_TOKEN
+      - ANTHROPIC_API_KEY
+    working_dir: /work
+
+  # gates / app check out only the committed state into /tmp/app
+  # (leftovers in the working tree and node_modules the AI installed are not carried over)
+  gates:
+    <<: *image
+    profiles: [gates]
+    volumes:
+      - ${WORKSPACE:?}:/src:ro
+      - pnpm-store:/home/pwuser/.pnpm-store
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        git clone --quiet /src /tmp/app && cd /tmp/app
+        ${INSTALL_COMMAND:?} || exit 97
+        ${GATES_COMMAND:?}
+
+  app: &app
+    <<: *image
+    profiles: [holdout]
+    volumes:
+      - ${WORKSPACE:?}:/src:ro
+      - pnpm-store:/home/pwuser/.pnpm-store
+    environment:
+      - TEST_MODE=1
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        git clone --quiet /src /tmp/app && cd /tmp/app
+        ${INSTALL_COMMAND:?} || exit 97
+        ${APP_COMMAND:?}
+    # Failures don't count during install and build (up to 15 minutes). After that, 3 failures in a row mean unhealthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:8787${HEALTH_PATH:-/}').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 5s
+      start_period: 15m
+      retries: 3
+
+  preview:
+    <<: *app
+    profiles: [preview]
+    ports:
+      - 127.0.0.1:${PREVIEW_PORT:-8787}:8787
+
+  holdout:
+    <<: *image
+    profiles: [holdout]
+    depends_on:
+      app:
+        condition: service_healthy
+    # Joins app's network namespace and reaches it at http://localhost:8787.
+    # Passkeys (WebAuthn) only work over https or on localhost, so http://app:8787 can't be used for testing.
+    # Only the network is shared; the filesystems stay separate
+    network_mode: service:app
+    volumes:
+      - ${HOLDOUT:?}:/holdout:ro
+      - ${REPORT_DIR:?}:/out
+      - npm-holdout:/home/pwuser/.npm
+    environment:
+      - BASE_URL=http://localhost:8787
+      # Extra playwright arguments added by the factory (shorter timeouts and retries for the check run against the unimplemented app)
+      - HOLDOUT_ARGS=${HOLDOUT_ARGS:-}
+    command:
+      - sh
+      - -c
+      - |
+        cp -r /holdout /tmp/h && cd /tmp/h && rm -rf node_modules
+        npm ci --silent > /dev/null 2>&1 || exit 97
+        npx playwright test --grep-invert @prod --pass-with-no-tests --reporter=json $$HOLDOUT_ARGS > /out/report.json 2> /dev/null
+        exit 0
+
+volumes:
+  pnpm-store:
+    name: blindforge-pnpm-store
+  pnpm-store-agent:
+    name: blindforge-pnpm-store-agent
+  npm-holdout:
+    name: blindforge-npm-holdout
+  npm-holdout-writer:
+    name: blindforge-npm-holdout-writer
