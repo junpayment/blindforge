@@ -170,6 +170,17 @@ blindforge status
   - Each arrow points from the side that starts the connection to the side that answers. While data flows, `»` moves along the arrow, and the more data, the faster it moves.
   - Colors show roles: AI in magenta, tests in yellow, the app in green, gates in blue, outside hosts in gray.
   - Traffic comes from the growth of `docker stats` network counters. `holdout → app` traffic stays on the app's localhost, so it counts as flowing whenever `holdout` is up and `app` is healthy.
+- Holdout progress while the acceptance tests run: the current phase (waiting for the app, installing test dependencies, running), a progress bar with passed / flaky / failed / skipped counts, elapsed time and an estimate of the time left, the tests running right now, and the ones that failed. The runs list shows a compact `holdout 34/120 ✗2`.
+
+  ```
+  Holdout progress
+    #############----------------- 10/24 41%  1m01s elapsed, ~1m26s left
+    ✓ 9  ~ 0 flaky  ✗ 1  - 0 skipped  ↻ 0 retried  4 workers
+    running  D26 12s
+    ✗ D25 header is gone on /history
+  ```
+
+  A small Playwright reporter (`reporter/progress-reporter.cjs`) is mounted read-only into the holdout container and writes test titles and outcomes to `reports/.../progress.jsonl` on the host. It records no test code and no error details, and the implementing AI never sees it.
 - The events of the selected run, plus the AI's recent tool calls while it works
 
 ## App config (`apps/<app>.yaml`)
