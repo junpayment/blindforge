@@ -116,6 +116,8 @@ services:
       - ${HOLDOUT:?}:/holdout:ro
       - ${REPORT_DIR:?}:/out
       - npm-holdout:/home/pwuser/.npm
+      # Streams progress (IDs and outcomes only) to /out/progress.jsonl for `blindforge status`
+      - ./reporter:/reporter:ro
     environment:
       - BASE_URL=http://localhost:8787
       # Extra playwright arguments added by the factory (shorter timeouts and retries for the check run against the unimplemented app)
@@ -124,9 +126,12 @@ services:
       - sh
       - -c
       - |
+        progress() { echo "{\"e\":\"$$1\",\"at\":$$(date +%s)000}" >> /out/progress.jsonl; }
+        progress install
         cp -r /holdout /tmp/h && cd /tmp/h && rm -rf node_modules
         npm ci --silent > /dev/null 2>&1 || exit 97
-        npx playwright test --grep-invert @prod --pass-with-no-tests --reporter=json $$HOLDOUT_ARGS > /out/report.json 2> /dev/null
+        progress run
+        npx playwright test --grep-invert @prod --pass-with-no-tests --reporter=json,/reporter/progress-reporter.cjs $$HOLDOUT_ARGS > /out/report.json 2> /dev/null
         exit 0
 
 volumes:

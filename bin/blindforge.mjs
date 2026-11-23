@@ -339,10 +339,12 @@ function runGates(ctx) {
 
 function runHoldout(ctx) {
   const report = join(ctx.reportDir, "report.json");
+  const progress = join(ctx.reportDir, "progress.jsonl"); // written by reporter/progress-reporter.cjs
   for (let i = 1; i <= 2; i++) {
-    setStatus({ stage: "holdout" });
+    setStatus({ stage: "holdout", reportDir: ctx.reportDir });
     log("holdout: acceptance tests");
     rmSync(report, { force: true });
+    rmSync(progress, { force: true });
     let res;
     try {
       res = compose(ctx, ["--profile", "holdout", "up", "--build", "--abort-on-container-exit", "--exit-code-from", "holdout"], {

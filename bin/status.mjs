@@ -12,6 +12,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { listApps, NetMonitor, renderNetwork } from "./network.mjs";
+import { progressLabel, readProgress, renderProgress } from "./holdout-progress.mjs";
 
 const c = {
   reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m", inverse: "\x1b[7m",
@@ -137,7 +138,7 @@ function render(root, state, data, { monitor, frame = 0, animate = true } = {}) 
       pad(resultLabel(r), 14),
       pad(`${r.app} #${r.target}`, 14),
       pad(r.command, 8),
-      pad(r.running ? r.stage : (r.pr ? r.pr.replace(/.*\/pull\//, "PR #") : r.stage), 14),
+      pad(r.running ? (r.stage === "holdout" ? progressLabel(readProgress(r.reportDir)) : r.stage) : (r.pr ? r.pr.replace(/.*\/pull\//, "PR #") : r.stage), 18),
       pad(attempt, 4),
       pad(duration(r.startedAt, r.finishedAt ? new Date(r.finishedAt).getTime() : r.running ? Date.now() : new Date(r.updatedAt).getTime()), 8),
       `${c.dim}${clock(r.startedAt)}${c.reset}`,
@@ -159,9 +160,15 @@ function render(root, state, data, { monitor, frame = 0, animate = true } = {}) 
     line(`${c.bold}Details${c.reset}  ${r.app} #${r.target} ${r.command}  ${c.dim}${r.file ?? ""}${c.reset}`);
     if (r.pr) line(`  PR: ${c.blue}${r.pr}${c.reset}`);
     if (r.reportDir) line(`  Report: ${c.dim}${r.reportDir}${c.reset}`);
+    if (r.running && r.stage === "holdout") {
+      // The app container of this run (project blindforge-<app>-[holdout-]<target>)
+      const app = (containers ?? []).find((x) => x.service === "app" &&
+        x.project.startsWith(`blindforge-${r.app}-`) && x.project.endsWith(`-${r.target}`));
+      for (const l of renderProgress(readProgress(r.reportDir), { appStatus: app?.status, maxLines: Math.max(4, Math.floor((rows - out.length) / 2)) })) line(l);
+    }
     const remaining = rows - out.length - 2;
     const activity = r.running && r.stage === "AI working" ? agentActivity(r.reportDir, Math.floor(remaining / 2)) : [];
-    const events = r.events.slice(-(remaining - activity.length - (activity.length ? 2 : 1)));
+    const events = r.events.slice(-Math.max(1, remaining - activity.length - (activity.length ? 2 : 1)));
     line(`  ${c.bold}Events${c.reset}`);
     for (const e of events) line(`  ${c.dim}${clock(e.at)}${c.reset} ${e.msg.replace(/\x1b\[[0-9;]*m/g, "").split("\n")[0]}`);
     if (activity.length) {
