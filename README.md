@@ -4,17 +4,23 @@ A software factory that runs on your own machine. **The AI implements features a
 
 You write an issue and review a spec. blindforge has Claude draft the spec, write hidden acceptance tests (the *holdout*), and implement the feature in isolated Docker containers. The tests decide pass or fail, and on a pass blindforge merges the PR and cuts a release.
 
-```
-issue  ──spec──▶  spec PR  ──(you review & merge)──▶  build
-                                                        │
-                    holdout: AI writes acceptance tests from the spec
-                    (separate repo, never visible to the implementing AI)
-                                                        │
-                    run: AI implements ─▶ gates ─▶ app + holdout tests
-                         ▲                                   │
-                         └── only failing test IDs ◀──────────┘
-                                                        │
-                    pass ─▶ PR ─▶ auto-merge ─▶ GitHub Release ─▶ your deploy workflow
+```mermaid
+flowchart TD
+  issue["Issue<br/>(you write it)"] -->|blindforge spec| spec["Spec PR<br/>drafted by AI"]
+  spec -->|you review and merge| holdout
+
+  subgraph build ["blindforge build"]
+    holdout["holdout: AI writes acceptance tests from the spec<br/>(separate repo, never visible to the implementing AI)"]
+    holdout --> impl["run: AI implements"]
+    impl --> gates["gates<br/>lint / types / unit / E2E"]
+    gates -->|fail| impl
+    gates -->|pass| tests["app + hidden acceptance tests"]
+    tests -->|"fail: only the failing IDs"| impl
+  end
+
+  tests -->|pass| pr["PR → auto-merge"]
+  pr --> release["GitHub Release"]
+  release --> deploy["your deploy workflow"]
 ```
 
 ## Why "blind"?
@@ -107,21 +113,35 @@ Each ID names a hidden test, so IDs must be unique across the holdout repo. `spe
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+  participant H as host (blindforge)
+  participant A as agent container
+  participant G as gates container
+  participant P as app container
+  participant T as holdout container
+
+  H->>H: clone the app repo into a fresh workspace
+  loop up to maxAttempts
+    H->>A: the issue and spec (or what failed last time)
+    Note over A: Claude implements.<br/>Sees only the workspace.
+    A-->>H: changes in the workspace
+    H->>H: commit
+    H->>G: lint / types / unit / E2E on the committed code (read-only)
+    alt gates fail
+      G-->>H: failed
+      Note over H: next attempt: "gates failed"
+    else gates pass
+      H->>P: start the committed code (cannot see the hidden tests)
+      T->>P: run the hidden tests from outside (browser and HTTP only)
+      T-->>H: report
+      Note over H: next attempt: only the failing IDs
+    end
+  end
+  Note over H: on pass: push → PR → auto-merge<br/>(unless an exception path was touched) → release
 ```
-blindforge run my-app 12
-  │
-  ├ clone the app repo into work/<app>/issue-<n>/
-  │
-  ├ loop (up to maxAttempts)
-  │   ① agent   : Claude (claude -p) implements    … sees only the workspace
-  │   ② host    : commits the changes
-  │   ③ gates   : lint / types / unit / E2E        … on the committed code, read-only
-  │   ④ app     : starts the committed code         … cannot see the hidden tests
-  │   ⑤ holdout : tests the app from outside        … runs none of the AI's code
-  │   on failure, only the failing IDs go back to ①
-  │
-  └ on pass: push → PR → auto-merge (unless an exception path was touched) → release
-```
+
+The AI never sees the hidden tests, their code, or their error messages. All it gets back is "gates failed" or the IDs of the acceptance criteria that failed.
 
 ### Isolation
 
