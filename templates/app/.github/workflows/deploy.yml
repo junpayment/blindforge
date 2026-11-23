@@ -1,0 +1,26 @@
+# blindforge never deploys. It tags main and creates a GitHub Release named deploy-YYYYMMDD-N.
+# This workflow picks that up and deploys. Replace the last step with your own deploy.
+# Keep production credentials here (repository secrets), never in blindforge.
+name: deploy
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  deploy:
+    if: startsWith(github.event.release.tag_name, 'deploy-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Deploy
+        run: echo "Replace this step with your deploy command" && exit 1

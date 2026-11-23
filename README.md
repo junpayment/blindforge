@@ -45,25 +45,43 @@ blindforge expects a **Node.js web app on GitHub** that follows a few convention
 
 | Convention | Why |
 |---|---|
-| Specs live in `specs/NNN-*.md`, each with a `## Acceptance criteria` (or `## 受け入れ条件`) section holding tables of `\| ID \| what to check \|` rows (IDs look like `A12`) | Each ID becomes one hidden test |
+| Specs live in `specs/NNN-*.md` (other files in `specs/` are ignored), each with a `## Acceptance criteria` (or `## 受け入れ条件`) section holding tables of `\| ID \| what to check \|` rows (IDs look like `A12`) | Each ID becomes one hidden test |
 | The app listens on `0.0.0.0:8787` when started with `appCommand` | Hidden tests reach it at `http://localhost:8787` |
 | A health endpoint (`healthPath`) returns 2xx once the app is up | blindforge waits for it before testing |
 | Production deploys run from a GitHub Actions workflow triggered by a `deploy-*` release | blindforge never holds production credentials |
-| A separate repo for the hidden tests (a Playwright project with `tests/` and `scenarios/`) | Keeps the tests out of the implementing AI's view |
+| A separate, private repo for the hidden tests, created from [`templates/holdout`](templates/holdout) (a Playwright project with `tests/`, `scenarios/` and `scripts/summarize.mjs`) | Keeps the tests out of the implementing AI's view. `summarize.mjs` reduces results to IDs and pass/fail |
 
 The containers come with Node, pnpm and Playwright. Apps that need other runtimes or services (Python, Go, a separate database, and so on) need changes to `agent.Dockerfile` and `compose.yaml`.
 
 ## Setup
+
+### With Claude Code (recommended)
+
+Open Claude Code in this directory and run the setup skill:
+
+```sh
+git clone https://github.com/junpayment/blindforge
+cd blindforge
+claude
+> /blindforge-setup
+```
+
+It checks your machine, inspects your app repository, writes `apps/<app>.yaml`, creates the hidden-test repository from [`templates/holdout`](templates/holdout), and opens a PR on your app with what it needs (`specs/`, port 8787, a health endpoint, a deploy workflow, a bug form). It asks before creating or pushing anything.
+
+### By hand
 
 ```sh
 git clone https://github.com/junpayment/blindforge
 cd blindforge
 npm install
 
-# 1. Configure your app (copy the sample and edit it)
+# 1. Configure your app (copy the sample and edit it; apps/* except the sample is gitignored)
 cp apps/sample-app.yaml apps/my-app.yaml
 
-# 2. Provide a Claude credential, either directly…
+# 2. Create a private repo for the hidden tests from templates/holdout,
+#    and add what your app repo needs (see templates/app and "What your app needs")
+
+# 3. Provide a Claude credential, either directly…
 export CLAUDE_CODE_OAUTH_TOKEN=...      # or ANTHROPIC_API_KEY=...
 
 #    …or encrypted with sops + age, loaded by direnv (.envrc is included)

@@ -111,7 +111,7 @@ function findSpec(appDir, issue, issueBody = "") {
     file = ref.slice("specs/".length);
   } else {
     file = readdirSync(specsDir)
-      .filter((f) => f.endsWith(".md"))
+      .filter(isSpecFile)
       .find((f) => new RegExp(`^issue:\\s*#${issue}\\b`, "m").test(readFileSync(join(specsDir, f), "utf8")));
   }
   if (!file) {
@@ -160,12 +160,15 @@ function usedHoldoutIds(app, dir) {
 
 // IDs used by existing specs (acceptance criteria tables, gates sections included), plus IDs on lines marked as retired (or 欠番).
 // Even if the holdout has no test for them yet, reusing another spec's ID makes the factory think "the test already exists"
+// Only NNN-<name>.md files under specs/ are specs. Others (a README with example tables, notes) are ignored
+const isSpecFile = (name) => /^\d+-.+\.md$/.test(name);
+
 function usedSpecIds(workspace, exceptFile) {
   const dir = join(workspace, "specs");
   const ids = new Set();
   if (!existsSync(dir)) return [];
   for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".md") || join("specs", name) === exceptFile) continue;
+    if (!isSpecFile(name) || join("specs", name) === exceptFile) continue;
     const text = readFileSync(join(dir, name), "utf8");
     const { holdoutIds, gateIds } = acceptanceIds(text);
     for (const id of [...holdoutIds, ...gateIds]) ids.add(id);

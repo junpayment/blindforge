@@ -5,3 +5,6 @@ reports/
 .DS_Store
 state/
 secrets.enc.env
+# Your own app configs stay local (they name your repositories); only the sample is tracked
+apps/*
+!apps/sample-app.yaml
