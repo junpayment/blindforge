@@ -1,0 +1,21 @@
+# A bug report that blindforge can build straight away: "Related spec" tells it which spec's
+# acceptance tests to reuse, so `blindforge build` can skip the spec step.
+name: Bug
+description: Something doesn't work as a spec says
+labels: [bug]
+body:
+  - type: input
+    id: spec
+    attributes:
+      label: Related spec
+      description: The spec this bug breaks, e.g. specs/002-auth-login.md
+      placeholder: specs/002-auth-login.md
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: Steps, what you expected, and what happened instead
+    validations:
+      required: true
