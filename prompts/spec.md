@@ -15,7 +15,7 @@ issue #{{issue}}: {{title}}
 
 ## What the spec must include
 
-Write the spec in English.
+Write the spec in the same language as the existing specs (English if there are none yet). Section headings follow that language too; blindforge recognizes the acceptance-criteria section and gate sections in English or Japanese (`## Acceptance criteria` / `## 受け入れ条件`, `gate` / `ゲート`).
 
 - An `issue: #{{issue}}` line right after the first heading
 - Purpose, what to do, and **what not to do**
@@ -23,10 +23,10 @@ Write the spec in English.
 - Authentication and authorization (who can read and write what, and the status codes returned when accessing someone else's resources)
 - API (method, path, main request / response, and status codes on errors)
 - **Screens and UI contract**: the acceptance tests operate the screens relying only on the wording, labels, roles and display formats written here. Be specific about button and input labels, headings, list roles, the wording shown when empty, the role of error messages, and how numbers and dates are displayed
-- **Acceptance criteria** (in a `## Acceptance criteria` section): a table with IDs that defines what counts as done. A human reviews this table to approve the "definition of done", and the acceptance tests (holdout) are built from it one row at a time
+- **Acceptance criteria** (in a `## Acceptance criteria` section, or `## 受け入れ条件` in Japanese specs): a table with IDs that defines what counts as done. A human reviews this table to approve the "definition of done", and the acceptance tests (holdout) are built from it one row at a time
   - Format: `| ID | What to check |`. An ID is one uppercase letter + a number (the feature's initial for screens and user flows, S for authorization and APIs, and so on). Don't overlap with IDs in existing specs
   - **IDs used by existing specs and acceptance tests, and retired IDs** (you must not use them): {{usedIds}}
-  - The acceptance tests check things from a separate container **using only a browser and HTTP** (they can't see the app's source code). Collect anything that can't be checked from outside, such as code rules (lint rules, a component file existing, unit tests existing, and so on), in a `###` section whose heading contains the word `gate` (e.g. `### Code rules (checked by gates)`). The IDs in that section are checked by the implementation's gates (lint / typecheck / test / e2e), not by the acceptance tests
+  - The acceptance tests check things from a separate container **using only a browser and HTTP** (they can't see the app's source code). Collect anything that can't be checked from outside, such as code rules (lint rules, a component file existing, unit tests existing, and so on), in a `###` section whose heading contains the word `gate` (e.g. `### Code rules (checked by gates)`; in Japanese specs, `ゲート`). The IDs in that section are checked by the implementation's gates (lint / typecheck / test / e2e), not by the acceptance tests
   - Each row is a concrete behavior that can be checked from outside through screen interactions or API calls (no vague wording like "works correctly")
   - Cover not only the happy path but also input errors, unauthorized operations and boundary values
   - Don't write acceptance criteria to be checked in production (the factory doesn't run acceptance tests in production; all acceptance tests run in containers before deploy)
