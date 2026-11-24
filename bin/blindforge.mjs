@@ -1331,19 +1331,26 @@ async function deploy(appName) {
   return 0;
 }
 
-async function build(appName, issue) {
-  try {
-    const code = await holdout(appName, issue);
-    if (code !== 0) return code;
-    return await run(appName, issue);
-  } finally {
-    // The working clones (about 700 MB each including node_modules) are recreated on the next run, so remove them when done.
-    // Leaving them fills the Mac's disk, Docker goes read-only, and builds stop
-    const app = loadApp(appName);
-    for (const name of [`issue-${issue}`, `issue-${issue}-holdout`, `holdout-issue-${issue}`]) {
-      rmSync(join(ROOT, "work", app.name, name), { recursive: true, force: true });
-    }
+// The working clones (about 700 MB each including node_modules) are recreated on the next run, so remove them when done.
+// Leaving them fills the Mac's disk, Docker goes read-only, and builds stop. Used by build, run, holdout and resume
+function cleanWork(appName, issue) {
+  const app = loadApp(appName);
+  for (const name of [`issue-${issue}`, `issue-${issue}-holdout`, `holdout-issue-${issue}`, `spec-judge-${issue}`]) {
+    rmSync(join(ROOT, "work", app.name, name), { recursive: true, force: true });
   }
+}
+async function withCleanup(appName, issue, fn) {
+  try {
+    return await fn();
+  } finally {
+    cleanWork(appName, issue);
+  }
+}
+
+async function build(appName, issue) {
+  const code = await holdout(appName, issue);
+  if (code !== 0) return code;
+  return await run(appName, issue);
 }
 
 // Start a PR (by number) or branch in the same container as app and expose it at http://localhost:<port>.
@@ -1403,10 +1410,10 @@ const usage = `usage:
 const [cmd, ...rest] = process.argv.slice(2);
 const commands = {
   spec: (a, issue) => spec(a, Number(issue)),
-  holdout: (a, issue) => holdout(a, Number(issue)),
-  run: (a, issue) => run(a, Number(issue)),
-  build: (a, issue) => build(a, Number(issue)),
-  resume: (a, issue) => resume(a, Number(issue)),
+  holdout: (a, issue) => withCleanup(a, Number(issue), () => holdout(a, Number(issue))),
+  run: (a, issue) => withCleanup(a, Number(issue), () => run(a, Number(issue))),
+  build: (a, issue) => withCleanup(a, Number(issue), () => build(a, Number(issue))),
+  resume: (a, issue) => withCleanup(a, Number(issue), () => resume(a, Number(issue))),
   deploy: (a) => deploy(a),
   regress: (a) => regress(a),
   preview: (a, ref) => preview(a, ref),
