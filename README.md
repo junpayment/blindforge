@@ -112,7 +112,7 @@ blindforge preview my-app <PR>    # run a PR in a container at http://127.0.0.1:
 | Command | What it does | Who merges |
 |---|---|---|
 | `spec` | Drafts a spec from the issue. If the spec PR is already open, it applies your unaddressed review comments. | You |
-| `holdout` | Writes a hidden test for every acceptance-criteria ID. Then checks that every ID has a test and that the tests run against the unimplemented app. | Automatic |
+| `holdout` | Writes a hidden test for every acceptance-criteria ID. Then checks that every ID has a test and that the tests run against the unimplemented app. The writer reviews why each test fails (or already passes) there, and fixes the tests that fail for the wrong reason. | Automatic |
 | `run` | Implements the issue. It refuses to start unless every ID already has a hidden test. | Automatic. It stops for you on exception paths, zero tests, or after `maxAttempts` failures. |
 | `build` | `holdout`, then `run` | |
 | `deploy` | Tags `main` and creates a GitHub Release | |
