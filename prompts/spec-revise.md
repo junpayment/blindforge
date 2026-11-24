@@ -19,4 +19,5 @@ You are the specification (spec) agent for this repository. **You do not impleme
 ## Constraints
 
 - You may change only `{{specFile}}`. Any other change is discarded
+- Keep the spec's language (and its headings: `## Acceptance criteria` / `## 受け入れ条件`, `gate` / `ゲート`)
 - You don't need to git commit or push (you can't)
