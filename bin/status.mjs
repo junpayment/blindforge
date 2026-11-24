@@ -109,15 +109,35 @@ const resultLabel = (r) =>
   : r.result === "error" ? `${c.red}✗ error${c.reset}`
   : `${c.dim}– interrupted${c.reset}`;
 
+// The flaky ledger written by blindforge (state/flaky.jsonl): tests that passed only on retry or failed when repeated.
+// Counts per app and ID over the last 30 days, most frequent first
+function readFlaky(root) {
+  const file = join(root, "state", "flaky.jsonl");
+  if (!existsSync(file)) return [];
+  const since = Date.now() - 30 * 24 * 3600 * 1000;
+  const byId = new Map();
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (new Date(e.at).getTime() < since) continue;
+    const key = `${e.app} ${e.id}`;
+    const x = byId.get(key) ?? { app: e.app, id: e.id, title: e.title, count: 0, last: e.at };
+    x.count += 1;
+    if (e.at > x.last) x.last = e.at;
+    byId.set(key, x);
+  }
+  return [...byId.values()].sort((a, b) => b.count - a.count || b.last.localeCompare(a.last));
+}
+
 // Load the state (files and docker ps). Called less often than the redraw (animation)
 function collect(root) {
-  return { runs: readRuns(root), containers: readContainers(), apps: listApps(root) };
+  return { runs: readRuns(root), containers: readContainers(), apps: listApps(root), flaky: readFlaky(root) };
 }
 
 function render(root, state, data, { monitor, frame = 0, animate = true } = {}) {
   const cols = process.stdout.columns || 100;
   const rows = process.stdout.rows || 30;
-  const { runs, containers, apps } = data;
+  const { runs, containers, apps, flaky = [] } = data;
   state.selected = Math.min(state.selected, Math.max(0, runs.length - 1));
   const out = [];
   const line = (s = "") => out.push(truncate(s, cols + 20));
@@ -152,6 +172,17 @@ function render(root, state, data, { monitor, frame = 0, animate = true } = {}) 
   if (containers === null) line(`  ${c.red}can't connect to docker${c.reset}`);
   else if (containers.length === 0) line(`  ${c.dim}(nothing running)${c.reset}`);
   else for (const l of renderNetwork(containers, { apps, monitor, frame, animate, width, pad })) line(l);
+
+  // Flaky tests (last 30 days). Two or more and blindforge opens an issue in the holdout repo
+  if (flaky.length > 0) {
+    line();
+    line(`${c.bold}Flaky tests${c.reset} ${c.dim}(last 30 days)${c.reset}`);
+    for (const f of flaky.slice(0, 5)) {
+      const mark = f.count >= 2 ? `${c.red}×${f.count}${c.reset}` : `${c.yellow}×${f.count}${c.reset}`;
+      line(`  ${mark} ${f.app} ${truncate(f.title ?? f.id, cols - 30)} ${c.dim}${clock(f.last)}${c.reset}`);
+    }
+    if (flaky.length > 5) line(`  ${c.dim}…and ${flaky.length - 5} more${c.reset}`);
+  }
 
   // Details
   const r = runs[state.selected];
