@@ -564,6 +564,24 @@ function confirmStable(ctx) {
   return [...new Set(failing.map((t) => t.id))];
 }
 
+// What the test writer gets when its tests fail lint
+const lintPrompt = (output) =>
+  `The tests fail \`npm run lint\`. Its rules catch patterns that make tests flaky, and its type-check catches mistakes such as using a helper outside the test that defines it. Fix every problem below (wait for the state instead of sleeping, use web-first assertions such as \`expect(locator).toHaveText\` / \`toHaveAttribute\`). Don't disable rules. Then run \`npm run lint\` and \`npx playwright test --list\`.\n\n\`\`\`\n${output.slice(-6000)}\n\`\`\``;
+
+// Every path where the writer changes tests outside the main holdout step (judge fixes, repairs, spec updates)
+// must leave lint passing too, or the next spec's writer would inherit problems it didn't write. One extra round
+function lintWriterChange(ctx, wctx, label) {
+  const lint = lintHoldout(ctx);
+  if (lint.ok) return true;
+  log(`${label}: the test writer's change fails lint. Asking it to fix that`);
+  writeFileSync(join(wctx.reportDir, "lint.log"), lint.output);
+  runAgent(wctx, lintPrompt(lint.output), label, "holdout-writer");
+  commitHoldout(ctx.holdout, `holdout: fix lint (issue #${ctx.issue})`);
+  const again = lintHoldout(ctx);
+  if (!again.ok) log(`${label}: lint still fails after one round. Merging anyway; the next holdout step will flag it`);
+  return again.ok;
+}
+
 // The holdout repo's lint (if it has one): catches flaky patterns such as fixed sleeps when the tests are written
 function lintHoldout(ctx) {
   const res = compose(
@@ -799,6 +817,7 @@ function fixTestsFromJudge(ctx, items, dir) {
     sh("git", ["-C", ctx.holdout, "reset", "-q", "--hard", "HEAD~1"]);
     return false;
   }
+  lintWriterChange(ctx, wctx, "judge");
   mergeHoldoutBranch(ctx, wctx, `holdout: fix tests flagged by the judge (${ctx.app.repo}#${ctx.issue})`, [
     `🤖 The judge found that these tests didn't check what ${ctx.target.file} says. The test writer fixed them against the spec (it never saw the implementation).`,
     "",
@@ -826,6 +845,7 @@ function repairTestRegression(ctx, ids) {
     log("judge: the test writer changed nothing in the repair");
     return false;
   }
+  lintWriterChange(ctx, wctx, "judge");
   mergeHoldoutBranch(ctx, wctx, `holdout: repair tests broken by the judge fix (${ctx.app.repo}#${ctx.issue})`,
     `🤖 The previous test fix broke ${ids.join(", ")}, which passed before it. The test writer repaired them.`);
   return true;
@@ -887,6 +907,7 @@ function updateTestsForSpecChange(ctx, diff) {
     log("The test writer changed nothing for the spec update");
     return;
   }
+  lintWriterChange(ctx, wctx, "spec update");
   mergeHoldoutBranch(ctx, wctx, `holdout: follow the corrected ${ctx.target.file} (${ctx.app.repo}#${ctx.issue})`,
     `🤖 ${ctx.target.file} was corrected after its tests were written. The test writer updated the tests for the changed rows.\n\n\`\`\`diff\n${diff}\n\`\`\``);
 }
@@ -1191,7 +1212,7 @@ async function holdout(appName, issue) {
     if (!lint.ok) {
       log(`attempt ${attempt}: the tests fail lint`);
       writeFileSync(join(ctx.reportDir, "lint.log"), lint.output);
-      prompt = `The tests fail \`npm run lint\`. Its rules catch patterns that make tests flaky. Fix every problem below in the tests you wrote (wait for the state instead of sleeping, use web-first assertions such as \`expect(locator).toHaveText\`). Don't disable rules. Then run \`npm run lint\` and \`npx playwright test --list\`.\n\n\`\`\`\n${lint.output.slice(-6000)}\n\`\`\``;
+      prompt = lintPrompt(lint.output);
       continue;
     }
 
