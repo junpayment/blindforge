@@ -8,10 +8,13 @@ You are the only role that sees both sides. The implementing AI never sees the t
 - `/holdout/`: the hidden tests. Shared helpers live in `/holdout/tests/helpers/`.
 - `/out/report.json`: the Playwright JSON report of the latest attempt (errors, stack locations).
 - `/out/history.md`: which IDs failed in which attempt.
+- `/out/gates.log` (only if it exists): the gates output of the latest attempt.
 
 ## Failing IDs
 
 {{ids}}
+
+{{gatesNote}}
 
 ## How to decide
 
