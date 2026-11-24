@@ -28,6 +28,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { baseRunReview } from "./holdout-review.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -720,6 +721,7 @@ async function holdout(appName, issue) {
   log(`${target.file}: writing tests for acceptance criteria ${target.ids.join(", ")}`);
 
   let prompt = render("holdout.md", { specFile: target.file, ids: target.ids.join(", ") });
+  let reviewed = false;
   for (let attempt = 1; attempt <= app.maxAttempts; attempt++) {
     ctx.reportDir = join(ctx.reportRoot, `attempt-${attempt}`);
     mkdirSync(ctx.reportDir, { recursive: true });
@@ -758,6 +760,18 @@ async function holdout(appName, issue) {
       continue;
     }
 
+    // 3. One review round: show the writer how each test behaved against the unimplemented app,
+    // so it can tell "fails because the feature is missing" from "fails because the test is wrong".
+    // (The writer never reaches the app itself; that stays the holdout's job.)
+    if (!reviewed && attempt < app.maxAttempts) {
+      reviewed = true;
+      const review = baseRunReview(join(ctx.reportDir, "report.json"), target.ids);
+      writeFileSync(join(ctx.reportDir, "review.md"), review.text);
+      log(`attempt ${attempt}: reviewing results against the unimplemented app (${review.failed} failing, ${review.passed} passing already)`);
+      prompt = render("holdout-review.md", { results: review.text });
+      continue;
+    }
+
     const rows = target.ids.map((id) => {
       const r = summary.find((x) => x.id === id);
       return `| ${id} | ${r ? r.status : "(@prod: runs only in production)"} |`;
@@ -773,6 +787,7 @@ async function holdout(appName, issue) {
         "## Mechanical checks",
         `- ✅ Every acceptance criteria ID has a test (${target.ids.length})`,
         "- ✅ The test harness works when run against the unimplemented app (main)",
+        reviewed ? "- ✅ The writer reviewed why each test fails (or passes) against the unimplemented app" : "- ⚠️ No review round (out of attempts)",
         "",
         "## Results against the unimplemented app (for reference; failing is correct for now)",
         "",
