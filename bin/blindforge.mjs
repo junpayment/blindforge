@@ -1089,8 +1089,22 @@ async function specRevise(app, issue, pr) {
 }
 
 // Have the AI draft a spec from an issue and open a PR
+// The issue's body plus its human comments (blindforge's own comments are left out). Decisions and additions
+// often land in comments after the issue was written, and the spec has to reflect them
+function issueWithComments(app, issue) {
+  const j = JSON.parse(sh("gh", ["issue", "view", String(issue), "-R", app.repo, "--json", "title,body,comments"]));
+  const comments = (j.comments ?? []).filter((c) => !c.body.includes(FACTORY_MARK));
+  const body = comments.length === 0 ? j.body : [
+    j.body,
+    "",
+    "## Comments on the issue (oldest first; later comments take precedence)",
+    ...comments.map((c) => `\n### ${c.createdAt?.slice(0, 10) ?? ""}\n\n${c.body}`),
+  ].join("\n");
+  return { title: j.title, body };
+}
+
 async function specDraft(app, issue) {
-  const issueJson = JSON.parse(sh("gh", ["issue", "view", String(issue), "-R", app.repo, "--json", "title,body"]));
+  const issueJson = issueWithComments(app, issue);
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const ctx = {
     app, issue, title: issueJson.title,
