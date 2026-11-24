@@ -976,7 +976,7 @@ async function resume(appName, issue) {
   }
 }
 
-function finish(ctx, passed, failures, { holdoutEmpty = false } = {}) {
+async function finish(ctx, passed, failures, { holdoutEmpty = false } = {}) {
   if (!passed) {
     const url = openPr(ctx, {
       force: true,
@@ -1012,7 +1012,13 @@ function finish(ctx, passed, failures, { holdoutEmpty = false } = {}) {
       force: true, draft: false, body: `✅ Passed the gates and the holdout.\n\nCloses #${ctx.issue}` });
   sh("gh", ["pr", "merge", url, "--squash", "--delete-branch"]);
   log(`Merged: ${url}`);
-  return deploy(ctx.app.name);
+  const code = await deploy(ctx.app.name);
+  if (code === 0 && ctx.app.regressAfterMerge) {
+    // A build scores only this spec's tests and @golden. Check that the merge didn't break any other spec's tests
+    log("regressAfterMerge: running every hidden test against the merged base branch");
+    await regress(ctx.app.name);
+  }
+  return code;
 }
 
 // Have the AI draft a spec from an issue and open a PR. No implementation.

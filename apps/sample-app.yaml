@@ -30,6 +30,8 @@ contractDeletionPaths:
 # What a build scores: "targeted" runs this spec's tests plus tests tagged @golden (the app's core paths).
 # "all" runs every hidden test. Either way, `blindforge regress` runs every test against main separately.
 holdoutScope: targeted
+# After an auto-merge and deploy, also run `blindforge regress` (every hidden test against main). Failures go into one issue
+regressAfterMerge: false
 # After a pass, run this spec's tests this many more times without retries (0 turns it off)
 repeatCheck: 3
 
