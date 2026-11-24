@@ -73,6 +73,8 @@ Show the user what you'll create, and ask before creating it.
 
 Check that it works: in that directory, `npm ci && BASE_URL=http://localhost:8787 npx playwright test --list` should finish with `Total: 0 tests` and no error.
 
+The template comes with `npm run lint` (rules that reject flaky patterns), which blindforge runs after the holdout agent writes tests. Once a few specs have tests, help the user pick 10–15 core journeys (sign-in, the main flow) and add `@golden` to their titles. Every build runs those plus the current spec's tests.
+
 ## 5. Prepare the app repository
 
 Do these on a branch in the app repository and open one PR for the user to review. Don't merge it yourself. List what you changed in the PR body.

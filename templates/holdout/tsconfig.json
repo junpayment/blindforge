@@ -1,0 +1,14 @@
+{
+  // Type-checks the tests (npm run lint runs tsc --noEmit). Catches mistakes such as calling a helper
+  // that only exists inside another test, before they reach a build
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["tests/**/*.ts", "playwright.config.ts"]
+}

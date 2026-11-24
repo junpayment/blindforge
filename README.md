@@ -115,6 +115,8 @@ blindforge preview my-app <PR>    # run a PR in a container at http://127.0.0.1:
 | `holdout` | Writes a hidden test for every acceptance-criteria ID. Then checks that every ID has a test and that the tests run against the unimplemented app. The writer reviews why each test fails (or already passes) there, and fixes the tests that fail for the wrong reason. | Automatic |
 | `run` | Implements the issue. It refuses to start unless every ID already has a hidden test. | Automatic. It stops for you on exception paths, zero tests, or after `maxAttempts` failures. |
 | `build` | `holdout`, then `run` | |
+| `regress` | Runs every hidden test against the base branch, outside of any build. Failures go into one issue on the app repo (IDs and spec numbers only) | — |
+| `resume` | Continues from the issue's open draft PR: brings in the base branch (e.g. a corrected spec), updates the tests if the spec changed, re-scores the existing implementation, and keeps fixing | Same as `run` |
 | `deploy` | Tags `main` and creates a GitHub Release | |
 
 ### Reviewing a spec
@@ -170,12 +172,40 @@ The AI never sees the hidden tests, their code, or their error messages. All it 
 | `app` | the workspace (read-only) | hidden tests |
 | `holdout` | hidden tests (read-only) and the report directory | the workspace |
 | `holdout-writer` | the holdout clone and the app's `specs/` (read-only) | the app's source code |
+| `judge` | the implementation, the hidden tests and the failing report, all read-only | nothing; but it only speaks in spec terms (below) |
 
 - Only the host script pushes, opens PRs, merges and creates releases. The AI never touches GitHub.
 - `gates` and `app` `git clone` the workspace, so only committed code gets tested. Nothing the AI leaves behind in its environment is carried over.
 - After every AI commit, `.github/` is reset to its original state, so AI-written workflows can never read your deploy secrets.
 - Changes to `exceptions` paths, and line deletions in `contractDeletionPaths`, wait for a human merge.
 - This repository itself (compose file, orchestrator, exception lists) is never visible to the AI.
+
+### The judge
+
+A hidden test can be wrong too, and the implementing AI can't tell, because it only sees failing IDs. So when **the same IDs fail in two attempts in a row**, blindforge asks a judge, once per run. It's the only role that sees both the implementation and the tests, and it decides per ID against the spec:
+
+| Verdict | What happens next |
+|---|---|
+| **test**: the spec is clear and the test doesn't check what it says | The test writer gets only how the test differs from the spec (never how the implementation behaves), fixes the tests, and the fix is merged into the holdout repo. The same implementation is re-scored without spending an attempt |
+| **implementation**: the spec is clear and the code doesn't do it | The next fix prompt gets spec-grounded hints (never test code or errors) |
+| **spec**: ambiguous, wrong, or contradicting another spec | The judge proposes a corrected spec as a PR for a human, and the implementation stops as a draft. After the spec PR is merged, `blindforge resume` brings it in, updates the tests for the changed rows, and continues |
+| **unsure** | Stops as a draft with the judge's question for a human |
+
+If a test fix breaks tests that passed before it, those go straight back to the test writer with their errors, since the implementer could never fix them.
+
+The writer still never sees the implementation, and the implementer still never sees the tests.
+
+### What a build runs
+
+A build doesn't run all the hidden tests. It runs **this spec's tests plus the golden path**: tests tagged `@golden` (put `@golden` in the test title), a handful of core journeys such as signing in and the main flow. That keeps scoring fast, and an unrelated flaky test can't block the build. Set `holdoutScope: all` to run everything instead.
+
+Breakage elsewhere is caught by `blindforge regress <app>`, which runs every test against the base branch. Run it after merges or on a schedule (cron, launchd, a CI job).
+
+### Flaky tests
+
+- **Lint and type-check**: the holdout repo's `npm run lint` (in [`templates/holdout`](templates/holdout)) runs ESLint rules that reject patterns that make tests flaky (fixed sleeps, reads that don't wait, `networkidle`, `force: true`), then `tsc --noEmit`, which catches mistakes such as calling a helper that only exists inside another test. The holdout agent has to pass it.
+- **Repeat check**: after a build passes, this spec's tests run `repeatCheck` (3) more times without retries. A test that fails even once counts as failing, so the judge looks at it if it keeps happening. Racy code gets caught here too.
+- **Ledger**: every test that passes only on retry, or fails when repeated, goes into `state/flaky.jsonl`. `blindforge status` lists the most frequent ones, and a test that's been flaky twice gets an issue in the holdout repo.
 
 ### Infrastructure failures
 
@@ -238,6 +268,8 @@ See [`apps/sample-app.yaml`](apps/sample-app.yaml).
 | `healthPath` | Path polled to decide that the app is up |
 | `exceptions` | Paths that are never auto-merged. A trailing `/` means a directory. |
 | `contractDeletionPaths` | Paths where deleting lines blocks auto-merge. Pure additions are fine. |
+| `holdoutScope` | `targeted` (default): a build runs this spec's tests plus `@golden`. `all`: every test |
+| `repeatCheck` | After a pass, run this spec's tests this many more times without retries (default 3, 0 = off) |
 | `timeoutsMinutes` | Time limits for `agent`, `gates` and `holdout` |
 
 ## Limitations

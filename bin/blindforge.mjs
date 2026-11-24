@@ -6,6 +6,8 @@
 //   blindforge holdout <app> <issue>    Write the holdout from the spec's acceptance criteria; merge it if the checks pass
 //   blindforge run <app> <issue>        Implement the issue and take it through to merge
 //   blindforge build <app> <issue>      Run holdout, then run (after the spec is merged, this is all you need)
+//   blindforge resume <app> <issue>     Continue from the issue's open draft PR (e.g. after the judge's spec fix is merged)
+//   blindforge regress <app>            Run every hidden test against the base branch (builds only run their spec's tests + @golden)
 //   blindforge deploy <app>             Tag main and create a Release (also runs automatically after an auto-merge).
 //                                    The production deploy is done by the app's GitHub Actions, triggered by the Release
 //   blindforge preview <app> <pr|branch> Start it in a container and expose it on localhost so a human can try it
@@ -23,7 +25,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
+  appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -341,12 +343,13 @@ function runGates(ctx) {
   throw new InfraError(`gates dependency install failed twice (network or similar). Log: ${ctx.reportDir}/gates.log`);
 }
 
-function runHoldout(ctx) {
+function runHoldout(ctx, { grep, args, label } = {}) {
+  ctx = { ...ctx, extraEnv: { ...ctx.extraEnv, ...(grep ? { HOLDOUT_GREP: grep } : {}), ...(args ? { HOLDOUT_ARGS: args } : {}) } };
   const report = join(ctx.reportDir, "report.json");
   const progress = join(ctx.reportDir, "progress.jsonl"); // written by reporter/progress-reporter.cjs
   for (let i = 1; i <= 2; i++) {
     setStatus({ stage: "holdout", reportDir: ctx.reportDir });
-    log("holdout: acceptance tests");
+    log(`holdout: acceptance tests${label ? ` (${label})` : ""}`);
     rmSync(report, { force: true });
     rmSync(progress, { force: true });
     let res;
@@ -363,6 +366,7 @@ function runHoldout(ctx) {
     // Don't hand an empty report to the AI as a test failure (HARNESS); treat it as a run that couldn't happen
     if (existsSync(report) && statSync(report).size > 0) {
       const summary = JSON.parse(sh("node", [join(ctx.holdout, "scripts", "summarize.mjs"), report]));
+      noteFlaky(ctx, reportTests(report).filter((t) => t.status === "flaky"), "passed only on retry");
       // Zero scenarios is not a "failure" (the AI can't fix it), but it's no evidence of passing either.
       // Stop the loop, but don't auto-merge; send it to a human instead (holdoutEmpty in finish)
       return { passed: summary.every((x) => x.status === "passed"), empty: summary.length === 0, summary };
@@ -402,10 +406,20 @@ function listHoldoutIds(ctx) {
 
 function openPr(ctx, { draft, body, title = `blindforge: ${ctx.title}`, repo = ctx.app.repo, force = false }) {
   sh("git", ["-C", ctx.workspace, "push", "-q", "-u", ...(force ? ["--force"] : []), "origin", ctx.branch]);
-  const args = ["pr", "create", "-R", repo, "--base", ctx.app.baseBranch, "--head", ctx.branch,
-    "--title", title, "--body", body];
-  if (draft) args.push("--draft");
-  const url = sh("gh", args);
+  // Reuse the open PR for this branch (e.g. the draft that `resume` picked up) instead of failing on "already exists"
+  const existing = JSON.parse(sh("gh", ["pr", "list", "-R", repo, "--head", ctx.branch, "--state", "open", "--json", "url,isDraft"]))[0];
+  let url;
+  if (existing) {
+    url = existing.url;
+    sh("gh", ["pr", "edit", url, "--title", title, "--body", body]);
+    if (existing.isDraft && !draft) sh("gh", ["pr", "ready", url]);
+    if (!existing.isDraft && draft) sh("gh", ["pr", "ready", url, "--undo"]);
+  } else {
+    const args = ["pr", "create", "-R", repo, "--base", ctx.app.baseBranch, "--head", ctx.branch,
+      "--title", title, "--body", body];
+    if (draft) args.push("--draft");
+    url = sh("gh", args);
+  }
   setStatus({ stage: "PR", pr: url });
   return url;
 }
@@ -438,6 +452,7 @@ async function run(appName, issue) {
 
   // Don't start implementing without tests
   const target = withSpec(app, issue, ctx.workspace, issueJson.body);
+  ctx.target = target;
   ctx.reportDir = ctx.reportRoot;
   mkdirSync(ctx.reportDir, { recursive: true });
   const listed = listHoldoutIds(ctx);
@@ -467,34 +482,461 @@ async function run(appName, issue) {
   }
 }
 
-async function implementLoop(ctx, firstPrompt) {
+// ---- What the holdout runs, flaky tests, and the full regression run ----
+
+// A Playwright --grep pattern for these acceptance-criteria IDs (test titles start with "<ID> "), optionally plus @golden.
+// Playwright matches it against "<project> <file> <describe> <title> <tags>", so the ID is preceded by a space
+const idGrep = (ids, { golden = false } = {}) =>
+  [`(^| )(${[...new Set(ids)].join("|")}) `, ...(golden ? ["@golden"] : [])].join("|");
+
+// What a build scores: this spec's tests plus the golden path (default), or every test (holdoutScope: all).
+// The full suite runs separately with `blindforge regress`
+function buildScope(ctx) {
+  if (ctx.app.holdoutScope === "all") return { label: "all tests" };
+  return {
+    grep: idGrep(ctx.target.ids, { golden: true }),
+    label: `${ctx.target.ids.length} IDs of ${ctx.target.file} + @golden`,
+  };
+}
+
+// Tests in a Playwright JSON report, with their status ("expected", "unexpected", "flaky", "skipped")
+function reportTests(reportFile) {
+  let report;
+  try { report = JSON.parse(readFileSync(reportFile, "utf8")); } catch { return []; }
+  const out = [];
+  const walk = (suite) => {
+    for (const spec of suite.specs ?? []) {
+      for (const t of spec.tests) out.push({ id: spec.title.split(/\s+/)[0], title: spec.title, file: spec.file, status: t.status, ok: spec.ok });
+    }
+    for (const child of suite.suites ?? []) walk(child);
+  };
+  for (const suite of report.suites ?? []) walk(suite);
+  return out;
+}
+
+// The flaky ledger: state/flaky.jsonl, one line per test that passed only on retry or failed when repeated.
+// `blindforge status` shows it. A test that's been flaky twice gets an issue in the holdout repo (once)
+const FLAKY_LEDGER = join(STATE_DIR, "flaky.jsonl");
+function noteFlaky(ctx, items, how) {
+  const seen = new Map(items.map((x) => [x.id, x]));
+  if (seen.size === 0) return;
+  mkdirSync(STATE_DIR, { recursive: true });
+  const at = new Date().toISOString();
+  const source = `${current?.command ?? "run"} ${ctx.app.name} ${ctx.issue === "regress" ? "main" : `#${ctx.issue}`}`;
+  appendFileSync(FLAKY_LEDGER, [...seen.values()]
+    .map((x) => `${JSON.stringify({ at, app: ctx.app.name, id: x.id, title: x.title, file: x.file, how, source })}\n`).join(""));
+  log(`flaky: ${[...seen.keys()].join(", ")} (${how})`);
+
+  const ledger = readFileSync(FLAKY_LEDGER, "utf8").split("\n").filter(Boolean)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((e) => e?.app === ctx.app.name);
+  for (const x of seen.values()) {
+    const count = ledger.filter((e) => e.id === x.id).length;
+    if (count < 2) continue;
+    const title = `flaky: ${x.title}`;
+    try {
+      const open = JSON.parse(sh("gh", ["issue", "list", "-R", ctx.app.holdoutRepo, "--state", "open", "--search", `flaky ${x.id} in:title`, "--json", "title"]));
+      if (open.some((i) => i.title.startsWith(`flaky: ${x.id} `))) continue;
+      sh("gh", ["issue", "create", "-R", ctx.app.holdoutRepo, "--title", title, "--body", [
+        `blindforge has seen this test pass only on retry, or fail when repeated, ${count} times.`,
+        "",
+        `- File: \`${x.file ?? "?"}\``,
+        `- Latest: ${how}, during \`${source}\``,
+        "",
+        "Fix the test so it waits for the state it checks: no fixed sleeps, no reads that don't wait, nothing measured mid-animation. If the app itself is racy, say so here, so it can be fixed in the app.",
+      ].join("\n")]);
+      log(`flaky: opened an issue in ${ctx.app.holdoutRepo} for ${x.id}`);
+    } catch (e) {
+      log(`flaky: could not open an issue for ${x.id}: ${e.message.split("\n")[0]}`);
+    }
+  }
+}
+
+// After a pass: run this spec's tests a few more times without retries. Returns the IDs that failed at least once
+function confirmStable(ctx) {
+  const times = ctx.app.repeatCheck ?? 3;
+  if (!times) return [];
+  const rctx = { ...ctx, reportDir: `${ctx.reportDir}-repeat` };
+  mkdirSync(rctx.reportDir, { recursive: true });
+  runHoldout(rctx, { grep: idGrep(ctx.target.ids), args: `--retries=0 --repeat-each=${times}`, label: `this spec's tests ${times} more times, no retries` });
+  const failing = reportTests(join(rctx.reportDir, "report.json")).filter((t) => t.status === "unexpected");
+  noteFlaky(ctx, failing, `failed when repeated ${times} times`);
+  return [...new Set(failing.map((t) => t.id))];
+}
+
+// The holdout repo's lint (if it has one): catches flaky patterns such as fixed sleeps when the tests are written
+function lintHoldout(ctx) {
+  const res = compose(
+    { ...ctx, workspace: ctx.holdout },
+    ["--profile", "holdout-writer", "run", "--rm", "holdout-writer", "sh", "-c", "npm ci --silent && npm run --if-present lint"],
+    { capture: true },
+  );
+  return { ok: res.status === 0, output: `${res.stdout ?? ""}\n${res.stderr ?? ""}`.trim() };
+}
+
+// `blindforge regress <app>`: every hidden test against the base branch, outside of any build.
+// Failures go into one issue on the app repo, listing only IDs and spec numbers (no test content)
+async function regress(appName) {
+  const app = loadApp(appName);
+  const ctx = {
+    app, issue: "regress", title: "regression run",
+    project: `blindforge-${app.name}-regress`,
+    workspace: join(ROOT, "work", app.name, "regress"),
+    reportRoot: join(ROOT, "reports", app.name, "regress", runIdNow()),
+  };
+  cloneFresh(app.repo, ctx.workspace);
+  const sha = sh("git", ["-C", ctx.workspace, "rev-parse", "--short", "HEAD"]);
+  ctx.holdout = cloneFresh(app.holdoutRepo, join(ROOT, "work", app.name, "regress-holdout"));
+  ctx.reportDir = ctx.reportRoot;
+  mkdirSync(ctx.reportDir, { recursive: true });
+  log(`regress: every hidden test against ${app.repo}@${sha}`);
+  try {
+    const { summary } = runHoldout(ctx, { label: "all tests" });
+    const failing = summary.filter((x) => x.status !== "passed").map((x) => x.id);
+    const tests = reportTests(join(ctx.reportDir, "report.json"));
+    const specOf = (id) => tests.find((t) => t.id === id)?.file?.match(/(\d{3})-/)?.[1];
+
+    const title = "regress: acceptance tests failing on main";
+    const open = JSON.parse(sh("gh", ["issue", "list", "-R", app.repo, "--state", "open", "--search", `"${title}" in:title`, "--json", "number,title"]))
+      .find((i) => i.title === title);
+    if (failing.length === 0) {
+      log(`regress: all ${summary.length} passed`);
+      if (open) sh("gh", ["issue", "close", String(open.number), "-R", app.repo, "--comment", `${FACTORY_MARK}\n✅ All acceptance tests pass on ${sha}.`]);
+      return 0;
+    }
+    const body = [
+      FACTORY_MARK,
+      `❌ ${failing.length} of ${summary.length} acceptance tests fail on \`${sha}\` (\`blindforge regress\`).`,
+      "",
+      ...failing.map((id) => `- ${id}${specOf(id) ? ` (spec ${specOf(id)})` : ""}`),
+      "",
+      "Either a change broke these, or the tests are wrong. Check them against their specs.",
+    ].join("\n");
+    if (open) sh("gh", ["issue", "comment", String(open.number), "-R", app.repo, "--body", body]);
+    else sh("gh", ["issue", "create", "-R", app.repo, "--title", title, "--body", body]);
+    log(`regress: ${failing.length} failing: ${failing.join(", ")}`);
+    return 1;
+  } finally {
+    rmSync(ctx.workspace, { recursive: true, force: true });
+    rmSync(ctx.holdout, { recursive: true, force: true });
+  }
+}
+
+// Gates, then the holdout. skipGates re-scores the same commit after only the tests changed
+function score(ctx, { skipGates = false } = {}) {
+  if (!skipGates && !runGates(ctx)) {
+    return { gates: false, passed: false, empty: false, ids: [], failures: "Failed: gates (one of lint / typecheck / test / e2e)" };
+  }
+  const { passed, empty, summary } = runHoldout(ctx, buildScope(ctx));
+  writeFileSync(join(ctx.reportDir, "holdout-result.json"), JSON.stringify(summary));
+  const ids = summary.filter((x) => x.status !== "passed").map((x) => x.id);
+  if (passed && !empty) {
+    // Passing once isn't enough: repeat this spec's tests without retries to catch flaky tests and racy code
+    const unstable = confirmStable(ctx);
+    if (unstable.length > 0) {
+      return { gates: true, passed: false, empty, ids: unstable, failures: `Failed holdout scenarios when repeated (intermittent): ${unstable.join(", ")}` };
+    }
+  }
+  return { gates: true, passed, empty, ids, failures: `Failed holdout scenarios: ${ids.join(", ") || "(no result)"}` };
+}
+
+async function implementLoop(ctx, firstPrompt, { scoreFirst = false } = {}) {
   const { app } = ctx;
   let prompt = firstPrompt;
   let failures = "";
+  const history = []; // { attempt, gates, ids } per attempt, for the judge
   for (let attempt = 1; attempt <= app.maxAttempts; attempt++) {
     ctx.reportDir = join(ctx.reportRoot, `attempt-${attempt}`);
     mkdirSync(ctx.reportDir, { recursive: true });
 
-    runAgent(ctx, prompt, attempt);
-    commitWorkspace(ctx, attempt);
-
-    if (!runGates(ctx)) {
-      failures = "Failed: gates (one of lint / typecheck / test / e2e)";
+    if (scoreFirst && attempt === 1) {
+      log(`attempt ${attempt}: scoring the existing implementation`);
     } else {
-      const { passed, empty, summary } = runHoldout(ctx);
-      writeFileSync(join(ctx.reportDir, "holdout-result.json"), JSON.stringify(summary));
-      if (passed) {
-        log(empty ? `attempt ${attempt}: gates passed. The holdout has 0 scenarios` : `attempt ${attempt}: passed`);
-        return finish(ctx, true, "", { holdoutEmpty: empty });
-      }
-      const ids = summary.filter((x) => x.status !== "passed").map((x) => x.id);
-      failures = `Failed holdout scenarios: ${ids.join(", ") || "(no result)"}`;
+      runAgent(ctx, prompt, attempt);
+      commitWorkspace(ctx, attempt);
     }
 
+    let result = score(ctx);
+    if (result.passed) {
+      log(result.empty ? `attempt ${attempt}: gates passed. The holdout has 0 scenarios` : `attempt ${attempt}: passed`);
+      return finish(ctx, true, "", { holdoutEmpty: result.empty });
+    }
+    failures = result.failures;
     log(`attempt ${attempt}: failed — ${failures}`);
-    prompt = render("fix.md", { failures });
+    history.push({ attempt, gates: result.gates, ids: result.ids });
+
+    // The same acceptance tests failing in two attempts in a row: ask the judge, once per run
+    let hints = "";
+    const prev = history.at(-2);
+    // A resumed draft already failed repeatedly before, so its first re-score counts as a repeat
+    const resumedRepeat = scoreFirst && attempt === 1 && result.gates;
+    const repeated = (prev?.gates || resumedRepeat) && result.gates
+      ? result.ids.filter((id) => id !== "HARNESS" && (resumedRepeat || prev.ids.includes(id)))
+      : [];
+    if (repeated.length > 0 && !ctx.judged) {
+      ctx.judged = true;
+      const outcome = adjudicate(ctx, repeated, history);
+      if (outcome.stop) return outcome.code;
+      if (outcome.rescore) {
+        ctx.reportDir = join(ctx.reportRoot, `attempt-${attempt}-rescore`);
+        mkdirSync(ctx.reportDir, { recursive: true });
+        log(`attempt ${attempt}: re-scoring the same implementation with the corrected tests`);
+        const before = new Set(result.ids);
+        result = score(ctx, { skipGates: true });
+        // Only the tests changed, so a test that passed before and fails now was broken by the test fix.
+        // That goes back to the test writer, never to the implementer (who could never fix it)
+        const broken = result.ids.filter((id) => id !== "HARNESS" && !before.has(id));
+        if (broken.length > 0 && repairTestRegression(ctx, broken)) {
+          ctx.reportDir = join(ctx.reportRoot, `attempt-${attempt}-rescore-2`);
+          mkdirSync(ctx.reportDir, { recursive: true });
+          log(`attempt ${attempt}: re-scoring again after repairing the tests`);
+          result = score(ctx, { skipGates: true });
+        }
+        if (result.passed) {
+          log(`attempt ${attempt}: passed with the corrected tests`);
+          return finish(ctx, true, "", { holdoutEmpty: result.empty });
+        }
+        failures = result.failures;
+        log(`attempt ${attempt}: still failing — ${failures}`);
+        history[history.length - 1] = { attempt, gates: true, ids: result.ids };
+      }
+      hints = outcome.hints;
+    }
+    prompt = render("fix.md", { failures, hints, specFile: ctx.target.file });
   }
   return finish(ctx, false, failures);
+}
+
+// Stage only tests/ and scenarios/ in the holdout clone and commit. Anything else the writer touched is discarded
+function commitHoldout(dir, message) {
+  const git = (...a) => sh("git", ["-C", dir, ...a]);
+  git("reset", "-q", "--", ".");
+  git("add", "-A", "--", "tests", "scenarios");
+  git("checkout", "-q", "--", ".");
+  const staged = spawnSync("git", ["-C", dir, "diff", "--cached", "--quiet"]).status !== 0;
+  if (staged) git("commit", "-q", "-m", message);
+  return staged;
+}
+
+// Push the holdout clone's current branch as a PR to the holdout repo and merge it
+function mergeHoldoutBranch(ctx, wctx, title, body) {
+  const url = openPr(wctx, { draft: false, force: true, repo: ctx.app.holdoutRepo, title, body });
+  sh("gh", ["pr", "merge", url, "--squash", "--delete-branch"]);
+  log(`Merged the holdout: ${url}`);
+  setStatus({ pr: undefined });
+  return url;
+}
+
+// The judge: the only role that sees both the implementation and the hidden tests.
+// It decides test / implementation / spec / unsure per ID. blindforge passes on only spec-grounded messages:
+// test findings to the test writer, implementation findings to the implementer, spec problems to a human (spec PR).
+function adjudicate(ctx, ids, history) {
+  const dir = join(ctx.reportRoot, "judge");
+  mkdirSync(dir, { recursive: true });
+  copyFileSync(join(ctx.reportDir, "report.json"), join(dir, "report.json"));
+  writeFileSync(join(dir, "history.md"), history
+    .map((h) => `- attempt ${h.attempt}: ${h.gates ? `failed ${h.ids.join(", ") || "(none)"}` : "gates failed"}`).join("\n"));
+  log(`judge: ${ids.join(", ")} failed in two attempts in a row. Asking the judge whether the test, the implementation or the spec is wrong`);
+  const jctx = { ...ctx, reportDir: dir };
+  runAgent(jctx, render("judge.md", { specFile: ctx.target.file, ids: ids.map((id) => `- ${id}`).join("\n") }), "judge", "judge");
+
+  let verdict;
+  try {
+    verdict = JSON.parse(readFileSync(join(dir, "verdict.json"), "utf8"));
+  } catch {
+    log("judge: no readable verdict.json. Continuing without it");
+    return { hints: "" };
+  }
+  const pick = (v) => (verdict.ids ?? []).filter((x) => x.verdict === v && ids.includes(x.id));
+  const tests = pick("test"), impls = pick("implementation"), specs = pick("spec"), unsure = pick("unsure");
+  const names = (xs) => xs.map((x) => x.id).join(", ") || "-";
+  log(`judge: test ${names(tests)} / implementation ${names(impls)} / spec ${names(specs)} / unsure ${names(unsure)}`);
+
+  // Test findings are spec-grounded on their own, so apply them even when the run stops for a spec problem
+  if (specs.length > 0) {
+    if (tests.length > 0) fixTestsFromJudge(ctx, tests, dir);
+    return { stop: true, code: proposeSpecChange(ctx, specs, dir) };
+  }
+  if (unsure.length > 0) {
+    const url = openPr(ctx, {
+      force: true, draft: true,
+      body: [
+        "⚖️ The judge couldn't decide whether the test, the implementation or the spec is wrong. Needs a human.",
+        "",
+        ...unsure.map((x) => `- **${x.id}**: ${x.question}`),
+        "",
+        `Once it's settled, run \`blindforge resume ${ctx.app.name} ${ctx.issue}\` to continue from this PR.`,
+        "",
+        `Closes #${ctx.issue}`,
+      ].join("\n"),
+    });
+    log(`judge: waiting for a human: ${url}`);
+    return { stop: true, code: 1 };
+  }
+  const rescore = tests.length > 0 && fixTestsFromJudge(ctx, tests, dir);
+  const hints = impls.length > 0
+    ? ["", "A review against the spec found these requirements still unmet:", ...impls.map((x) => `- ${x.toImplementer}`), ""].join("\n")
+    : "";
+  return { rescore, hints };
+}
+
+// Test findings go to the test writer, who still can't see the implementation. It fixes the tests against the spec
+function fixTestsFromJudge(ctx, items, dir) {
+  const branch = `holdout/judge-issue-${ctx.issue}`;
+  sh("git", ["-C", ctx.holdout, "checkout", "-q", "-B", branch]);
+  const wctx = { ...ctx, workspace: ctx.holdout, appSrc: ctx.workspace, reportDir: join(dir, "writer"), branch };
+  mkdirSync(wctx.reportDir, { recursive: true });
+  const findings = items.map((x) => `- **${x.id}**: ${x.toWriter}`).join("\n");
+  runAgent(wctx, render("holdout-fix.md", { findings }), "judge", "holdout-writer");
+  if (!commitHoldout(ctx.holdout, `holdout: fix tests flagged by the judge (issue #${ctx.issue})`)) {
+    log("judge: the test writer changed nothing");
+    return false;
+  }
+  const listed = listHoldoutIds(ctx);
+  const missing = ctx.target.ids.filter((id) => !listed.has(id));
+  if (missing.length > 0) {
+    log(`judge: after the test fix, these IDs have no test: ${missing.join(", ")}. Dropping the fix`);
+    sh("git", ["-C", ctx.holdout, "reset", "-q", "--hard", "HEAD~1"]);
+    return false;
+  }
+  mergeHoldoutBranch(ctx, wctx, `holdout: fix tests flagged by the judge (${ctx.app.repo}#${ctx.issue})`, [
+    `🤖 The judge found that these tests didn't check what ${ctx.target.file} says. The test writer fixed them against the spec (it never saw the implementation).`,
+    "",
+    findings,
+  ].join("\n"));
+  return true;
+}
+
+// A test fix broke tests that used to pass. Show the writer their errors (its own tests, so it may see them) and let it repair them
+function repairTestRegression(ctx, ids) {
+  log(`judge: the test fix broke ${ids.join(", ")}, which passed before. Sending them back to the test writer`);
+  const review = baseRunReview(join(ctx.reportDir, "report.json"), ids);
+  const branch = `holdout/judge-issue-${ctx.issue}-repair`;
+  sh("git", ["-C", ctx.holdout, "checkout", "-q", "-B", branch]);
+  const wctx = { ...ctx, workspace: ctx.holdout, appSrc: ctx.workspace, reportDir: join(ctx.reportRoot, "judge", "repair"), branch };
+  mkdirSync(wctx.reportDir, { recursive: true });
+  const findings = [
+    "Your last change made these tests fail. They passed before it, and the app didn't change in between, so the change itself broke them",
+    "(e.g. a helper or variable used outside the test that defines it, or a shared helper whose behavior changed). Their results now:",
+    "",
+    review.text,
+  ].join("\n");
+  runAgent(wctx, render("holdout-fix.md", { findings }), "judge", "holdout-writer");
+  if (!commitHoldout(ctx.holdout, `holdout: repair tests broken by the judge fix (issue #${ctx.issue})`)) {
+    log("judge: the test writer changed nothing in the repair");
+    return false;
+  }
+  mergeHoldoutBranch(ctx, wctx, `holdout: repair tests broken by the judge fix (${ctx.app.repo}#${ctx.issue})`,
+    `🤖 The previous test fix broke ${ids.join(", ")}, which passed before it. The test writer repaired them.`);
+  return true;
+}
+
+// Spec findings: open a PR with the judge's corrected spec (a human merges it), and stop with the implementation as a draft
+function proposeSpecChange(ctx, items, dir) {
+  const problems = items.map((x) => `- **${x.id}**: ${x.specProblem}`).join("\n");
+  let specUrl = "";
+  const proposed = join(dir, "spec.md");
+  if (existsSync(proposed)) {
+    const branch = `spec/judge-issue-${ctx.issue}`;
+    const sdir = join(ROOT, "work", ctx.app.name, `spec-judge-${ctx.issue}`);
+    const sctx = { ...ctx, workspace: cloneFresh(ctx.app.repo, sdir, { branch }), branch };
+    copyFileSync(proposed, join(sdir, ctx.target.file));
+    sh("git", ["-C", sdir, "add", "--", ctx.target.file]);
+    if (spawnSync("git", ["-C", sdir, "diff", "--cached", "--quiet"]).status !== 0) {
+      sh("git", ["-C", sdir, "commit", "-q", "-m", `spec: correct ${ctx.target.file} (judge, issue #${ctx.issue})`]);
+      specUrl = openPr(sctx, {
+        force: true, draft: false,
+        title: `spec: correct ${ctx.target.file} (#${ctx.issue})`,
+        body: [
+          `⚖️ While implementing #${ctx.issue}, the same acceptance tests kept failing, and the judge traced it to the spec:`,
+          "",
+          problems,
+          "",
+          `Review and merge this, then run \`blindforge resume ${ctx.app.name} ${ctx.issue}\`. It continues from the draft implementation, updates the tests for the changed rows, and re-scores.`,
+        ].join("\n"),
+      });
+    }
+    rmSync(sdir, { recursive: true, force: true });
+  }
+  const url = openPr(ctx, {
+    force: true, draft: true,
+    body: [
+      "⚖️ Stopped: the judge found a problem in the spec, not in the code or the tests.",
+      "",
+      problems,
+      "",
+      specUrl ? `Spec fix: ${specUrl}` : "The judge didn't propose a spec file. Fix the spec by hand.",
+      `After the spec is merged, run \`blindforge resume ${ctx.app.name} ${ctx.issue}\` to continue from this PR.`,
+      "",
+      `Closes #${ctx.issue}`,
+    ].join("\n"),
+  });
+  log(`judge: spec problem. ${specUrl ? `Spec PR: ${specUrl}. ` : ""}Draft: ${url}`);
+  return 1;
+}
+
+// After a spec fix: update the tests for what changed in the spec (the writer gets the diff only)
+function updateTestsForSpecChange(ctx, diff) {
+  const branch = `holdout/spec-update-issue-${ctx.issue}`;
+  sh("git", ["-C", ctx.holdout, "checkout", "-q", "-B", branch]);
+  const wctx = { ...ctx, workspace: ctx.holdout, appSrc: ctx.workspace, reportDir: join(ctx.reportRoot, "spec-update"), branch };
+  mkdirSync(wctx.reportDir, { recursive: true });
+  log(`${ctx.target.file} changed since the implementation started. Updating its tests`);
+  runAgent(wctx, render("holdout-spec-update.md", { specFile: ctx.target.file, diff }), 0, "holdout-writer");
+  if (!commitHoldout(ctx.holdout, `holdout: follow the corrected ${ctx.target.file} (issue #${ctx.issue})`)) {
+    log("The test writer changed nothing for the spec update");
+    return;
+  }
+  mergeHoldoutBranch(ctx, wctx, `holdout: follow the corrected ${ctx.target.file} (${ctx.app.repo}#${ctx.issue})`,
+    `🤖 ${ctx.target.file} was corrected after its tests were written. The test writer updated the tests for the changed rows.\n\n\`\`\`diff\n${diff}\n\`\`\``);
+}
+
+// Continue from the open draft PR of an issue: bring in the base branch (e.g. a corrected spec),
+// update the tests if the spec changed, score the existing implementation, and keep fixing if needed
+async function resume(appName, issue) {
+  const app = loadApp(appName);
+  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN && !process.env.ANTHROPIC_API_KEY) throw new Error("CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is not set");
+  const issueJson = JSON.parse(sh("gh", ["issue", "view", String(issue), "-R", app.repo, "--json", "title,body"]));
+  const ctx = {
+    app, issue, title: issueJson.title,
+    project: `blindforge-${app.name}-${issue}`,
+    branch: `blindforge/issue-${issue}`,
+    workspace: join(ROOT, "work", app.name, `issue-${issue}`),
+    reportRoot: join(ROOT, "reports", app.name, `issue-${issue}`, runIdNow()),
+  };
+  const pr = JSON.parse(sh("gh", ["pr", "list", "-R", app.repo, "--head", ctx.branch, "--state", "open", "--json", "url"]))[0];
+  if (!pr) throw new Error(`No open PR for ${ctx.branch}. Run blindforge build to start from scratch`);
+  log(`issue #${issue}: resuming from ${pr.url}`);
+
+  cloneFresh(app.repo, ctx.workspace);
+  const git = (...a) => sh("git", ["-C", ctx.workspace, ...a]);
+  git("checkout", "-q", "-b", ctx.branch, `origin/${ctx.branch}`);
+  const base = `origin/${app.baseBranch}`;
+  const oldBase = git("merge-base", "HEAD", base);
+  if (spawnSync("git", ["-C", ctx.workspace, "merge", "-q", "--no-edit", base]).status !== 0) {
+    throw new Error(`Merging ${app.baseBranch} into ${ctx.branch} conflicts. Resolve it by hand, or run blindforge build to start over`);
+  }
+  ctx.baseSha = git("rev-parse", base);
+  ctx.holdout = cloneFresh(app.holdoutRepo, join(ROOT, "work", app.name, `issue-${issue}-holdout`));
+
+  const target = withSpec(app, issue, ctx.workspace, issueJson.body);
+  ctx.target = target;
+  ctx.reportDir = ctx.reportRoot;
+  mkdirSync(ctx.reportDir, { recursive: true });
+
+  const diff = git("diff", oldBase, base, "--", target.file);
+  if (diff) updateTestsForSpecChange(ctx, diff);
+
+  const listed = listHoldoutIds(ctx);
+  const missing = target.ids.filter((id) => !listed.has(id));
+  if (missing.length > 0) throw new Error(`Acceptance criteria in ${target.file} with no holdout test: ${missing.join(", ")}`);
+
+  try {
+    return await implementLoop(ctx, "", { scoreFirst: true });
+  } catch (e) {
+    if (e instanceof InfraError) log("Stopped on an infrastructure failure. Run blindforge resume again once things settle");
+    throw e;
+  }
 }
 
 function finish(ctx, passed, failures, { holdoutEmpty = false } = {}) {
@@ -744,6 +1186,15 @@ async function holdout(appName, issue) {
       continue;
     }
 
+    // Lint (if the holdout repo has it): rules that catch flaky patterns, such as fixed sleeps and reads that don't wait
+    const lint = lintHoldout(ctx);
+    if (!lint.ok) {
+      log(`attempt ${attempt}: the tests fail lint`);
+      writeFileSync(join(ctx.reportDir, "lint.log"), lint.output);
+      prompt = `The tests fail \`npm run lint\`. Its rules catch patterns that make tests flaky. Fix every problem below in the tests you wrote (wait for the state instead of sleeping, use web-first assertions such as \`expect(locator).toHaveText\`). Don't disable rules. Then run \`npm run lint\` and \`npx playwright test --list\`.\n\n\`\`\`\n${lint.output.slice(-6000)}\n\`\`\``;
+      continue;
+    }
+
     // 2. Run against the unimplemented app: does the test harness work?
     // Against the unimplemented app, every new test fails. With production's timeout (30 s) and retries,
     // that takes (number of tests) × 60 s and blows the holdout time limit. We only want to see that the harness works, so keep it short
@@ -751,7 +1202,7 @@ async function holdout(appName, issue) {
       ...ctx, workspace: ctx.appSrc,
       extraEnv: { ...ctx.extraEnv, HOLDOUT_ARGS: "--retries=0 --timeout=10000" },
     };
-    const { summary } = runHoldout(withApp);
+    const { summary } = runHoldout(withApp, { grep: idGrep(target.ids), label: `${target.ids.length} new tests against the unimplemented app` });
     writeFileSync(join(ctx.reportDir, "base-run.json"), JSON.stringify(summary));
     const harness = summary.find((x) => x.id === "HARNESS");
     if (harness) {
@@ -923,7 +1374,9 @@ const usage = `usage:
   blindforge holdout <app> <issue>
   blindforge run <app> <issue>
   blindforge build <app> <issue>
+  blindforge resume <app> <issue>        continue from the issue's open draft PR (e.g. after a spec fix)
   blindforge deploy <app>
+  blindforge regress <app>                run every hidden test against the base branch; failures go into one issue
   blindforge preview <app> <pr-number|branch>   (set the port with PREVIEW_PORT, default 8787)`;
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -932,13 +1385,15 @@ const commands = {
   holdout: (a, issue) => holdout(a, Number(issue)),
   run: (a, issue) => run(a, Number(issue)),
   build: (a, issue) => build(a, Number(issue)),
+  resume: (a, issue) => resume(a, Number(issue)),
   deploy: (a) => deploy(a),
+  regress: (a) => regress(a),
   preview: (a, ref) => preview(a, ref),
 };
 if (cmd === "status") {
   const { statusTui } = await import("./status.mjs");
   await statusTui(ROOT, { once: rest.includes("--once") });
-} else if (commands[cmd] && rest.length === (cmd === "deploy" ? 1 : 2)) {
+} else if (commands[cmd] && rest.length === (cmd === "deploy" || cmd === "regress" ? 1 : 2)) {
   if (cmd !== "preview") startStatus(cmd, loadApp(rest[0]), rest[1] ?? "main");
   commands[cmd](...rest).then(
     (code) => {
