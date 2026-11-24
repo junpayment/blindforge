@@ -681,19 +681,29 @@ async function implementLoop(ctx, firstPrompt, { scoreFirst = false } = {}) {
     }
     failures = result.failures;
     log(`attempt ${attempt}: failed — ${failures}`);
-    history.push({ attempt, gates: result.gates, ids: result.ids });
+    history.push({ attempt, gates: result.gates, ids: result.ids, reportDir: ctx.reportDir });
 
     // The same acceptance tests failing in two attempts in a row: ask the judge, once per run
     let hints = "";
     const prev = history.at(-2);
     // A resumed draft already failed repeatedly before, so its first re-score counts as a repeat
     const resumedRepeat = scoreFirst && attempt === 1 && result.gates;
-    const repeated = (prev?.gates || resumedRepeat) && result.gates
+    let repeated = (prev?.gates || resumedRepeat) && result.gates
       ? result.ids.filter((id) => id !== "HARNESS" && (resumedRepeat || prev.ids.includes(id)))
       : [];
+    // Acceptance tests failed, then the gates failed twice in a row: the implementer may be bending the code to a
+    // wrong test or spec and breaking the gates. Ask the judge about the tests that failed before the gates broke
+    let judgeFrom = { reportDir: ctx.reportDir };
+    if (repeated.length === 0 && !result.gates && prev && !prev.gates) {
+      const lastScored = [...history].reverse().find((h) => h.gates && h.ids.length > 0);
+      if (lastScored) {
+        repeated = lastScored.ids.filter((id) => id !== "HARNESS");
+        judgeFrom = { reportDir: lastScored.reportDir, gatesLog: join(ctx.reportDir, "gates.log") };
+      }
+    }
     if (repeated.length > 0 && !ctx.judged) {
       ctx.judged = true;
-      const outcome = adjudicate(ctx, repeated, history);
+      const outcome = adjudicate(ctx, repeated, history, judgeFrom);
       if (outcome.stop) return outcome.code;
       if (outcome.rescore) {
         ctx.reportDir = join(ctx.reportRoot, `attempt-${attempt}-rescore`);
@@ -748,15 +758,21 @@ function mergeHoldoutBranch(ctx, wctx, title, body) {
 // The judge: the only role that sees both the implementation and the hidden tests.
 // It decides test / implementation / spec / unsure per ID. blindforge passes on only spec-grounded messages:
 // test findings to the test writer, implementation findings to the implementer, spec problems to a human (spec PR).
-function adjudicate(ctx, ids, history) {
+function adjudicate(ctx, ids, history, { reportDir = ctx.reportDir, gatesLog } = {}) {
   const dir = join(ctx.reportRoot, "judge");
   mkdirSync(dir, { recursive: true });
-  copyFileSync(join(ctx.reportDir, "report.json"), join(dir, "report.json"));
+  copyFileSync(join(reportDir, "report.json"), join(dir, "report.json"));
+  // When the gates broke after these tests failed, show the judge the latest gates log too
+  if (gatesLog && existsSync(gatesLog)) copyFileSync(gatesLog, join(dir, "gates.log"));
+  else rmSync(join(dir, "gates.log"), { force: true });
   writeFileSync(join(dir, "history.md"), history
     .map((h) => `- attempt ${h.attempt}: ${h.gates ? `failed ${h.ids.join(", ") || "(none)"}` : "gates failed"}`).join("\n"));
   log(`judge: ${ids.join(", ")} failed in two attempts in a row. Asking the judge whether the test, the implementation or the spec is wrong`);
   const jctx = { ...ctx, reportDir: dir };
-  runAgent(jctx, render("judge.md", { specFile: ctx.target.file, ids: ids.map((id) => `- ${id}`).join("\n") }), "judge", "judge");
+  const gatesNote = gatesLog
+    ? "These tests failed, and the implementation attempts after that failed the gates (lint / typecheck / unit / e2e) instead. `/out/gates.log` is the latest gates output. The implementer may have bent the code toward a wrong test or spec and broken an existing check, so weigh the spec against the existing specs and checks."
+    : "";
+  runAgent(jctx, render("judge.md", { specFile: ctx.target.file, ids: ids.map((id) => `- ${id}`).join("\n"), gatesNote }), "judge", "judge");
 
   let verdict;
   try {

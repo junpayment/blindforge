@@ -182,7 +182,7 @@ The AI never sees the hidden tests, their code, or their error messages. All it 
 
 ### The judge
 
-A hidden test can be wrong too, and the implementing AI can't tell, because it only sees failing IDs. So when **the same IDs fail in two attempts in a row**, blindforge asks a judge, once per run. It's the only role that sees both the implementation and the tests, and it decides per ID against the spec:
+A hidden test can be wrong too, and the implementing AI can't tell, because it only sees failing IDs. So when **the same IDs fail in two attempts in a row**, blindforge asks a judge, once per run. It also asks when acceptance tests failed and the next two attempts then failed the gates: the implementer may be bending the code toward a wrong test or spec and breaking an existing check. It's the only role that sees both the implementation and the tests, and it decides per ID against the spec:
 
 | Verdict | What happens next |
 |---|---|
