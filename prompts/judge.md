@@ -26,7 +26,7 @@ For each ID:
 2. Read the test and the helpers it calls, line by line. Read the error in the report.
 3. Read the part of the implementation involved.
 4. Decide:
-   - `test`: the spec is clear, and the test doesn't check what it says. Examples: a wrong expected value, the wrong element, a misread response field, logging in twice, measuring at the wrong moment, a wrong endpoint, depending on another spec that isn't implemented yet.
+   - `test`: the spec is clear, and the test doesn't check what it says. Examples: a wrong expected value, the wrong element, a misread response field, logging in twice, measuring at the wrong moment (e.g. a size or position read while an element is still animating in: a value slightly off, or off by a slide distance, while the implementation's own styles meet the spec), a wrong endpoint, depending on another spec that isn't implemented yet.
    - `implementation`: the spec is clear, and the implementation doesn't do what it says.
    - `spec`: the spec itself is ambiguous, wrong, or contradicts itself or another spec, so that the test and the implementation can't both be held to it. Examples: a row says something "disappears", but no data matches. A row names one endpoint, but another spec defines a different one for that action. A row depends on a spec that isn't implemented.
    - `unsure`: you can't tell without a human. Use it rarely.
