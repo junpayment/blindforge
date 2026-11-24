@@ -199,7 +199,7 @@ The writer still never sees the implementation, and the implementer still never 
 
 A build doesn't run all the hidden tests. It runs **this spec's tests plus the golden path**: tests tagged `@golden` (put `@golden` in the test title), a handful of core journeys such as signing in and the main flow. That keeps scoring fast, and an unrelated flaky test can't block the build. Set `holdoutScope: all` to run everything instead.
 
-Breakage elsewhere is caught by `blindforge regress <app>`, which runs every test against the base branch. Run it after merges or on a schedule (cron, launchd, a CI job).
+Breakage elsewhere is caught by `blindforge regress <app>`, which runs every test against the base branch. Run it after merges or on a schedule (cron, launchd, a CI job), or set `regressAfterMerge: true` to run it automatically after every auto-merge. A failing regression doesn't change the build's result; it opens (or comments on) one issue on the app repo.
 
 ### Flaky tests
 
@@ -269,6 +269,7 @@ See [`apps/sample-app.yaml`](apps/sample-app.yaml).
 | `exceptions` | Paths that are never auto-merged. A trailing `/` means a directory. |
 | `contractDeletionPaths` | Paths where deleting lines blocks auto-merge. Pure additions are fine. |
 | `holdoutScope` | `targeted` (default): a build runs this spec's tests plus `@golden`. `all`: every test |
+| `regressAfterMerge` | After an auto-merge and deploy, run `blindforge regress` (default `false`) |
 | `repeatCheck` | After a pass, run this spec's tests this many more times without retries (default 3, 0 = off) |
 | `timeoutsMinutes` | Time limits for `agent`, `gates` and `holdout` |
 
