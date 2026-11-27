@@ -10,6 +10,8 @@ issue #{{issue}}: {{title}}
 
 1. Read `CLAUDE.md`, `blindforge/rules.md` (if it exists), and every existing spec in `specs/`. Match the style of the existing specs
 2. If needed, read the current code (`apps/`, `packages/`) so the spec doesn't contradict the existing data model, APIs and screens
+   - **Later specs override earlier ones.** Before you rely on a screen, region, button, label or field named in an older spec, search the newer specs (and the code) for it. A later spec may have renamed, merged or removed it, or replaced the acceptance criteria that mention it. Describe today's behavior, not the original one
+   - When your change alters behavior that existing acceptance criteria check (in any spec, including recent ones), list those IDs and how they should be read in a "replaced acceptance criteria" section. Include criteria that only use the changed behavior as a step (for example, a test that saves through a form you are moving)
 3. Create a new file `specs/NNN-<short-name-in-lowercase-and-hyphens>.md`. NNN is the highest existing number + 1 (3 digits)
 4. When you're done, briefly summarize the key points of the spec and its "Open questions", then finish
 
