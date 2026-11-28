@@ -199,6 +199,11 @@ const collisionWarning = (ids) =>
 class InfraError extends Error {}
 const timedOut = (res) => res?.error?.code === "ETIMEDOUT";
 const minutes = (ctx, key) => ctx.app.timeoutsMinutes?.[key];
+// The holdout's time limit. The full regression run (`regress`) runs every test, so it has its own, longer limit
+// (timeoutsMinutes.regress; default 3x the holdout limit)
+const holdoutMinutes = (ctx) => ctx.issue === "regress"
+  ? (ctx.app.timeoutsMinutes?.regress ?? (minutes(ctx, "holdout") ? minutes(ctx, "holdout") * 3 : undefined))
+  : minutes(ctx, "holdout");
 
 const render = (template, vars) =>
   readFileSync(join(ROOT, "prompts", template), "utf8").replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? "");
@@ -355,7 +360,7 @@ function runHoldout(ctx, { grep, args, label } = {}) {
     let res;
     try {
       res = compose(ctx, ["--profile", "holdout", "up", "--build", "--abort-on-container-exit", "--exit-code-from", "holdout"], {
-        capture: true, timeoutMin: minutes(ctx, "holdout"),
+        capture: true, timeoutMin: holdoutMinutes(ctx),
       });
     } finally {
       const logs = compose(ctx, ["--profile", "holdout", "logs", "--no-color", "--no-log-prefix", "app"], { capture: true });
@@ -371,7 +376,7 @@ function runHoldout(ctx, { grep, args, label } = {}) {
       // Stop the loop, but don't auto-merge; send it to a human instead (holdoutEmpty in finish)
       return { passed: summary.every((x) => x.status === "passed"), empty: summary.length === 0, summary };
     }
-    const why = timedOut(res) ? `did not finish within ${minutes(ctx, "holdout")} minutes`
+    const why = timedOut(res) ? `did not finish within ${holdoutMinutes(ctx)} minutes`
       : res.status === 97 ? "holdout dependency install failed"
       : "the app did not start (e.g. dependency install failed)";
     log(`Could not run the holdout: ${why} (infrastructure).${i === 1 ? " Retrying" : ""}`);

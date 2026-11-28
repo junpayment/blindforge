@@ -39,3 +39,5 @@ timeoutsMinutes:
   agent: 90
   gates: 30
   holdout: 30
+  # the full regression run (`blindforge regress`); default 3x holdout
+  regress: 90
