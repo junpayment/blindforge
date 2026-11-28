@@ -14,7 +14,7 @@
 # The factory treats that as an infrastructure failure and doesn't use up an AI attempt.
 #
 # Caches (named volumes shared across runs):
-#   - blindforge-pnpm-store:        gates / app / preview
+#   - blindforge-pnpm-store:        gates / app / preview (also holds their per-container checkouts under _runs/)
 #   - blindforge-pnpm-store-agent:  agent only (if the AI tampers with its cache, other containers are unaffected)
 #   - blindforge-npm-holdout:       holdout
 #   - blindforge-npm-holdout-writer: holdout-writer only
@@ -53,7 +53,10 @@ services:
       - ANTHROPIC_API_KEY
     working_dir: /work
 
-  # gates / app check out only the committed state into /tmp/app
+  # gates / app check out only the committed state into a fresh directory per container.
+  # That directory lives on the pnpm-store volume (see blindforge-rundir in agent.Dockerfile): pnpm can only
+  # hardlink from its store when node_modules is on the same filesystem. Elsewhere it copies every file,
+  # which made each install take about 6x longer.
   # (leftovers in the working tree and node_modules the AI installed are not carried over)
   # judge: when the same acceptance tests keep failing, decides whether the test, the implementation or the spec is wrong.
   # The only role that sees both the implementation (WORKSPACE) and the hidden tests (HOLDOUT), read-only.
@@ -81,7 +84,8 @@ services:
       - -c
       - |
         set -e
-        git clone --quiet /src /tmp/app && cd /tmp/app
+        . /usr/local/bin/blindforge-rundir
+        git clone --quiet /src "$$RUN_DIR/app" && cd "$$RUN_DIR/app"
         ${INSTALL_COMMAND:?} || exit 97
         ${GATES_COMMAND:?}
 
@@ -98,7 +102,8 @@ services:
       - -c
       - |
         set -e
-        git clone --quiet /src /tmp/app && cd /tmp/app
+        . /usr/local/bin/blindforge-rundir
+        git clone --quiet /src "$$RUN_DIR/app" && cd "$$RUN_DIR/app"
         ${INSTALL_COMMAND:?} || exit 97
         ${APP_COMMAND:?}
     # Failures don't count during install and build (up to 15 minutes). After that, 3 failures in a row mean unhealthy
