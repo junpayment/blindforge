@@ -271,7 +271,7 @@ See [`apps/sample-app.yaml`](apps/sample-app.yaml).
 | `holdoutScope` | `targeted` (default): a build runs this spec's tests plus `@golden`. `all`: every test |
 | `regressAfterMerge` | After an auto-merge and deploy, run `blindforge regress` (default `false`) |
 | `repeatCheck` | After a pass, run this spec's tests this many more times without retries (default 3, 0 = off) |
-| `timeoutsMinutes` | Time limits for `agent`, `gates` and `holdout` |
+| `timeoutsMinutes` | Time limits for `agent`, `gates`, `holdout` and `regress` (the full run; default 3× `holdout`) |
 
 ## Limitations
 
