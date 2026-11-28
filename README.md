@@ -215,6 +215,14 @@ blindforge doesn't count network or Docker problems against the AI.
 - If an install fails, or the app never becomes healthy, blindforge retries once. If it fails again, it stops without using up an AI attempt and comments on the issue.
 - Dependency caches live in named volumes and are reused between runs. The AI gets its own cache volume, separate from everyone else's.
 
+### Running builds side by side
+
+You can run builds for different issues of the same app at the same time (separate `blindforge build` processes). Each build has its own containers, clones and reports. Pick issues that don't depend on each other; blindforge doesn't check that.
+
+- **Merges go one at a time.** A build that passes waits for a per-app lock (`state/<app>.merge.lock`) before it merges. The lock is freed after the deploy, so the regression run doesn't block the next merge. A lock left by a process that has exited is removed.
+- **A moved base branch is scored again.** If another build merged while this one ran, blindforge merges the new base branch into the branch, updates the hidden tests (the other build may have added or fixed some), and runs the gates and the holdout again before merging. If they fail, the build keeps fixing as usual. If the merge conflicts, it opens a draft PR and stops; run `blindforge build` again to start from the new base.
+- **Tests that change other specs' behavior.** If a spec changes behavior that other specs' tests check, merge the rewritten tests right before that build, and don't run builds that those tests cover at the same time.
+
 ### Deploys
 
 blindforge never touches production. It tags `main` and creates a GitHub Release (`deploy-YYYYMMDD-N`). Your app's GitHub Actions workflow deploys on that release. The release is created with your `gh` token, so the workflow fires (releases created with `GITHUB_TOKEN` don't trigger workflows).
@@ -276,7 +284,7 @@ See [`apps/sample-app.yaml`](apps/sample-app.yaml).
 ## Limitations
 
 - Issue dependencies (GitHub's "Blocked by") are not checked before a build.
-- One issue per app runs at a time. Running issues in parallel isn't supported yet.
+- Builds can run side by side, but blindforge doesn't decide which issues are safe to run together (see "Running builds side by side").
 - Hidden tests are Playwright-only, so the app must be reachable over HTTP.
 
 ## License
