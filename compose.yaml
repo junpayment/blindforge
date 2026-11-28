@@ -145,6 +145,8 @@ services:
       - HOLDOUT_ARGS=${HOLDOUT_ARGS:-}
       # Which tests to run (a Playwright --grep pattern). Empty runs them all. Passed quoted, so it may contain spaces
       - HOLDOUT_GREP=${HOLDOUT_GREP:-}
+      # Playwright's --global-timeout (ms), set a little below the container's limit so a hung test still leaves a report
+      - HOLDOUT_GLOBAL_TIMEOUT=${HOLDOUT_GLOBAL_TIMEOUT:-}
     command:
       - sh
       - -c
@@ -154,7 +156,7 @@ services:
         cp -r /holdout /tmp/h && cd /tmp/h && rm -rf node_modules
         npm ci --silent > /dev/null 2>&1 || exit 97
         progress run
-        npx playwright test --grep-invert @prod --pass-with-no-tests --reporter=json,/reporter/progress-reporter.cjs $$HOLDOUT_ARGS $${HOLDOUT_GREP:+--grep} $${HOLDOUT_GREP:+"$$HOLDOUT_GREP"} > /out/report.json 2> /dev/null
+        npx playwright test --grep-invert @prod --pass-with-no-tests --reporter=json,/reporter/progress-reporter.cjs $$HOLDOUT_ARGS $${HOLDOUT_GLOBAL_TIMEOUT:+--global-timeout=$$HOLDOUT_GLOBAL_TIMEOUT} $${HOLDOUT_GREP:+--grep} $${HOLDOUT_GREP:+"$$HOLDOUT_GREP"} > /out/report.json 2> /dev/null
         exit 0
 
 volumes:
