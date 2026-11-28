@@ -349,7 +349,12 @@ function runGates(ctx) {
 }
 
 function runHoldout(ctx, { grep, args, label } = {}) {
-  ctx = { ...ctx, extraEnv: { ...ctx.extraEnv, ...(grep ? { HOLDOUT_GREP: grep } : {}), ...(args ? { HOLDOUT_ARGS: args } : {}) } };
+  // Stop Playwright a little before the container's limit, so a test that hangs still leaves a report
+  // (the hung test shows up as timed out) instead of an empty one and a wasted retry
+  const limit = holdoutMinutes(ctx);
+  const globalTimeout = limit ? Math.max(limit - 3, Math.ceil(limit * 0.9)) * 60_000 : undefined;
+  ctx = { ...ctx, extraEnv: { ...ctx.extraEnv, ...(grep ? { HOLDOUT_GREP: grep } : {}), ...(args ? { HOLDOUT_ARGS: args } : {}),
+    ...(globalTimeout ? { HOLDOUT_GLOBAL_TIMEOUT: String(globalTimeout) } : {}) } };
   const report = join(ctx.reportDir, "report.json");
   const progress = join(ctx.reportDir, "progress.jsonl"); // written by reporter/progress-reporter.cjs
   for (let i = 1; i <= 2; i++) {
