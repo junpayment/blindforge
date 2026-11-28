@@ -82,10 +82,18 @@ function loadApp(name) {
 const runIdNow = () => new Date().toISOString().replace(/[:.]/g, "-");
 
 // Make a throwaway clone. Without a branch, it stays on the default branch
+// A clone whose connection stalls never ends on its own, so it gets a time limit and is retried a couple of times
+const CLONE_TIMEOUT_MS = 10 * 60_000;
 function cloneFresh(repo, dir, { branch } = {}) {
-  rmSync(dir, { recursive: true, force: true });
   mkdirSync(dirname(dir), { recursive: true });
-  sh("gh", ["repo", "clone", repo, dir, "--", "-q"]);
+  for (let i = 1; ; i++) {
+    rmSync(dir, { recursive: true, force: true });
+    const res = spawnSync("gh", ["repo", "clone", repo, dir, "--", "-q"], { encoding: "utf8", timeout: CLONE_TIMEOUT_MS });
+    if (res.status === 0) break;
+    const why = timedOut(res) ? `did not finish within ${CLONE_TIMEOUT_MS / 60_000} minutes` : (res.stderr || res.error?.message || "").trim();
+    if (i >= 3) throw new InfraError(`Could not clone ${repo}: ${why}`);
+    log(`Could not clone ${repo} (${why}). Retrying`);
+  }
   sh("git", ["-C", dir, "config", "user.name", "blindforge"]);
   sh("git", ["-C", dir, "config", "user.email", "blindforge@localhost"]);
   if (branch) sh("git", ["-C", dir, "checkout", "-q", "-b", branch]);
@@ -606,15 +614,17 @@ function lintHoldout(ctx) {
 // Failures go into one issue on the app repo, listing only IDs and spec numbers (no test content)
 async function regress(appName) {
   const app = loadApp(appName);
+  // Builds running side by side can each start a regression run after their merge, so every run gets its own names
+  const id = `regress-${process.pid}`;
   const ctx = {
     app, issue: "regress", title: "regression run",
-    project: `blindforge-${app.name}-regress`,
-    workspace: join(ROOT, "work", app.name, "regress"),
+    project: `blindforge-${app.name}-${id}`,
+    workspace: join(ROOT, "work", app.name, id),
     reportRoot: join(ROOT, "reports", app.name, "regress", runIdNow()),
   };
   cloneFresh(app.repo, ctx.workspace);
   const sha = sh("git", ["-C", ctx.workspace, "rev-parse", "--short", "HEAD"]);
-  ctx.holdout = cloneFresh(app.holdoutRepo, join(ROOT, "work", app.name, "regress-holdout"));
+  ctx.holdout = cloneFresh(app.holdoutRepo, join(ROOT, "work", app.name, `${id}-holdout`));
   ctx.reportDir = ctx.reportRoot;
   mkdirSync(ctx.reportDir, { recursive: true });
   log(`regress: every hidden test against ${app.repo}@${sha}`);
@@ -668,6 +678,111 @@ function score(ctx, { skipGates = false } = {}) {
   return { gates: true, passed, empty, ids, failures: `Failed holdout scenarios: ${ids.join(", ") || "(no result)"}` };
 }
 
+// ---- Builds running side by side ----
+// Builds of different issues of one app can run at the same time: each has its own compose project, clones and reports.
+// What they share is the base branch. A build is scored on the base it cloned, so merges go one at a time under a
+// per-app lock, and a build whose base moved meanwhile merges the new base and is scored again before it merges.
+const heldLocks = new Set();
+process.on("exit", () => { for (const f of heldLocks) rmSync(f, { force: true }); });
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+
+async function acquireMergeLock(ctx) {
+  if (ctx.lock) return;
+  mkdirSync(STATE_DIR, { recursive: true });
+  const file = join(STATE_DIR, `${ctx.app.name}.merge.lock`);
+  let announced = false;
+  for (;;) {
+    try {
+      writeFileSync(file, JSON.stringify({ pid: process.pid, issue: ctx.issue, at: new Date().toISOString() }), { flag: "wx" });
+      ctx.lock = file;
+      heldLocks.add(file);
+      return;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+    let holder = null;
+    try {
+      holder = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      // Just created and not written yet, or unreadable. Treat an unreadable lock older than a minute as abandoned
+      try {
+        if (Date.now() - statSync(file).mtimeMs > 60_000) rmSync(file, { force: true });
+      } catch { /* already gone */ }
+    }
+    if (holder && !pidAlive(holder.pid)) {
+      rmSync(file, { force: true }); // its process is gone
+      continue;
+    }
+    if (!announced && holder) {
+      log(`Waiting for issue #${holder.issue} to finish merging (merges go one at a time)`);
+      setStatus({ stage: "waiting to merge" });
+      announced = true;
+    }
+    await new Promise((r) => setTimeout(r, 15_000));
+  }
+}
+
+function releaseMergeLock(ctx) {
+  if (!ctx.lock) return;
+  rmSync(ctx.lock, { force: true });
+  heldLocks.delete(ctx.lock);
+  ctx.lock = null;
+}
+
+// Take the merge lock. If the base branch moved since this build cloned it, merge it in, bring the holdout up to date
+// (other builds may have merged tests), and score again. Keeps the lock only when the build can go on to merge
+async function syncWithBase(ctx) {
+  await acquireMergeLock(ctx);
+  const base = ctx.app.baseBranch;
+  const git = (...a) => sh("git", ["-C", ctx.workspace, ...a], { timeout: CLONE_TIMEOUT_MS });
+  git("fetch", "-q", "origin", base);
+  const head = git("rev-parse", `origin/${base}`);
+  if (head === ctx.baseSha) return { ok: true };
+
+  log(`${base} moved while this build ran (${ctx.baseSha.slice(0, 7)} → ${head.slice(0, 7)}). Merging it in and scoring again`);
+  if (spawnSync("git", ["-C", ctx.workspace, "merge", "-q", "--no-edit", `origin/${base}`]).status !== 0) {
+    spawnSync("git", ["-C", ctx.workspace, "merge", "--abort"]);
+    releaseMergeLock(ctx);
+    return { ok: false, conflict: true };
+  }
+  ctx.baseSha = head;
+  // Judge fixes are merged into the holdout's default branch as they happen, so nothing local is lost
+  sh("git", ["-C", ctx.holdout, "fetch", "-q", "origin"], { timeout: CLONE_TIMEOUT_MS });
+  sh("git", ["-C", ctx.holdout, "checkout", "-q", "--detach", "origin/HEAD"]);
+
+  ctx.reportDir = join(ctx.reportDir, "after-base-merge");
+  mkdirSync(ctx.reportDir, { recursive: true });
+  const result = score(ctx);
+  if (result.passed) return { ok: true, result };
+  log(`Failing after merging the new ${base} — ${result.failures}`);
+  releaseMergeLock(ctx);
+  return { ok: false, result };
+}
+
+// The implementation passed on the base it started from: merge in a moved base, then finish (merge) or keep fixing
+async function passedOn(ctx, result) {
+  const synced = await syncWithBase(ctx);
+  if (synced.conflict) {
+    const url = openPr(ctx, {
+      force: true,
+      draft: true,
+      body: `🔀 Passed the gates and the holdout, but ${ctx.app.baseBranch} changed meanwhile (another build merged) and conflicts with this branch. Run \`blindforge build ${ctx.app.name} ${ctx.issue}\` again to start from the new ${ctx.app.baseBranch}, or resolve the conflict by hand.\n\nCloses #${ctx.issue}`,
+    });
+    log(`Conflicts with the new ${ctx.app.baseBranch}. Draft PR: ${url}`);
+    return { done: true, code: 1 };
+  }
+  if (synced.ok) return { done: true, code: await finish(ctx, true, "", { holdoutEmpty: (synced.result ?? result).empty }) };
+  return { done: false, result: synced.result };
+}
+
 async function implementLoop(ctx, firstPrompt, { scoreFirst = false } = {}) {
   const { app } = ctx;
   let prompt = firstPrompt;
@@ -687,7 +802,9 @@ async function implementLoop(ctx, firstPrompt, { scoreFirst = false } = {}) {
     let result = score(ctx);
     if (result.passed) {
       log(result.empty ? `attempt ${attempt}: gates passed. The holdout has 0 scenarios` : `attempt ${attempt}: passed`);
-      return finish(ctx, true, "", { holdoutEmpty: result.empty });
+      const next = await passedOn(ctx, result);
+      if (next.done) return next.code;
+      result = next.result;
     }
     failures = result.failures;
     log(`attempt ${attempt}: failed — ${failures}`);
@@ -732,7 +849,9 @@ async function implementLoop(ctx, firstPrompt, { scoreFirst = false } = {}) {
         }
         if (result.passed) {
           log(`attempt ${attempt}: passed with the corrected tests`);
-          return finish(ctx, true, "", { holdoutEmpty: result.empty });
+          const next = await passedOn(ctx, result);
+          if (next.done) return next.code;
+          result = next.result;
         }
         failures = result.failures;
         log(`attempt ${attempt}: still failing — ${failures}`);
@@ -1004,6 +1123,7 @@ async function finish(ctx, passed, failures, { holdoutEmpty = false } = {}) {
       draft: false,
       body: `🛑 Contains changes to exception paths, so no auto-merge. Needs human review and a manual merge.\n\n${hits.map((f) => `- \`${f}\``).join("\n")}\n\nCloses #${ctx.issue}`,
     });
+    releaseMergeLock(ctx);
     log(`Hit exception paths; waiting for approval: ${url}`);
     return 0;
   }
@@ -1014,6 +1134,7 @@ async function finish(ctx, passed, failures, { holdoutEmpty = false } = {}) {
       draft: false,
       body: `⚠️ The gates passed, but the holdout had 0 scenarios (no acceptance tests ran). No auto-merge. A human should check the behavior and merge (\`blindforge preview ${ctx.app.name} <this PR number>\`).\n\nCloses #${ctx.issue}`,
     });
+    releaseMergeLock(ctx);
     log(`The holdout had 0 scenarios; waiting for a human to check: ${url}`);
     return 0;
   }
@@ -1023,6 +1144,8 @@ async function finish(ctx, passed, failures, { holdoutEmpty = false } = {}) {
   sh("gh", ["pr", "merge", url, "--squash", "--delete-branch"]);
   log(`Merged: ${url}`);
   const code = await deploy(ctx.app.name);
+  // The next build may merge now. The regression run below doesn't need the lock (it has its own names)
+  releaseMergeLock(ctx);
   if (code === 0 && ctx.app.regressAfterMerge) {
     // A build scores only this spec's tests and @golden. Check that the merge didn't break any other spec's tests
     log("regressAfterMerge: running every hidden test against the merged base branch");
